@@ -1066,7 +1066,9 @@ jobs:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
         run: |
-          mapfile -t ipas < <(find "$RUNNER_TEMP/ipa" -maxdepth 1 -name '*.ipa' 2>/dev/null | sort)
+          # macOS's /bin/bash is 3.2: no mapfile.
+          ipas=()
+          while IFS= read -r f; do ipas+=("$f"); done < <(find "$RUNNER_TEMP/ipa" -maxdepth 1 -name '*.ipa' 2>/dev/null | sort)
           if [ "${#ipas[@]}" = 0 ]; then
             echo "- iOS: nothing to upload (no app was built)." >> "$GITHUB_STEP_SUMMARY"
             exit 0
