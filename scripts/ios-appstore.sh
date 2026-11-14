@@ -82,10 +82,22 @@ flutter pub get --enforce-lockfile
 defines=()
 [ "$app" = cashier ] && defines=(--dart-define=CASHIER_VERSION="$version")
 flutter build ios --release --no-codesign --build-name="$marketing" --build-number="$build" "${defines[@]}"
+# The signing settings go to the Runner target only, through the xcconfig
+# its Release configuration is based on: on xcodebuild's command line they
+# would reach every target, and the Swift packages' targets (one per
+# plugin) refuse a provisioning profile. This is the build's own checkout.
+cat >> ios/Flutter/Release.xcconfig <<XCCONFIG
+
+// Release signing for App Store Connect, added by software's ios-appstore.sh.
+CODE_SIGN_STYLE = Manual
+DEVELOPMENT_TEAM = $TEAM
+CODE_SIGN_IDENTITY = Apple Distribution
+CODE_SIGN_IDENTITY[sdk=iphoneos*] = Apple Distribution
+PROVISIONING_PROFILE_SPECIFIER = $name
+OTHER_CODE_SIGN_FLAGS = --keychain $keychain
+XCCONFIG
 xcodebuild -workspace ios/Runner.xcworkspace -scheme Runner -configuration Release \
-  -archivePath "$work/Runner.xcarchive" -destination 'generic/platform=iOS' archive \
-  CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="$TEAM" CODE_SIGN_IDENTITY="Apple Distribution" \
-  PROVISIONING_PROFILE_SPECIFIER="$name" OTHER_CODE_SIGN_FLAGS="--keychain $keychain"
+  -archivePath "$work/Runner.xcarchive" -destination 'generic/platform=iOS' archive
 xcodebuild -exportArchive -archivePath "$work/Runner.xcarchive" \
   -exportOptionsPlist "$work/ExportOptions.plist" -exportPath "$work/export"
 mkdir -p "$out"
