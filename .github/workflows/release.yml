@@ -237,6 +237,7 @@ jobs:
           KEY: ${{ vars.IRETAIL_LICENSE_PUBLIC_KEY }}
           SOURCE_COMMIT: ${{ needs.plan.outputs.node }}
         run: |
+          mkdir -p "$RUNNER_TEMP/out"
           scripts/image.sh node src Dockerfile "$VERSION" "$REGISTRY/node" hub,store "$RUNNER_TEMP/out" \
             src/scripts/oci-artifact.sh > "$RUNNER_TEMP/out/node.entry.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -266,6 +267,7 @@ jobs:
         env:
           SOURCE_COMMIT: ${{ needs.plan.outputs.node }}
         run: |
+          mkdir -p "$RUNNER_TEMP/out"
           scripts/image.sh updater src Dockerfile.updater "$VERSION" "$REGISTRY/updater" hub,store "$RUNNER_TEMP/out" \
             src/scripts/oci-artifact.sh > "$RUNNER_TEMP/out/updater.entry.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -315,6 +317,7 @@ jobs:
         env:
           SOURCE_COMMIT: ${{ needs.plan.outputs.manager }}
         run: |
+          mkdir -p "$RUNNER_TEMP/out"
           scripts/image.sh console src console/Dockerfile "$VERSION" "$REGISTRY/console" hub "$RUNNER_TEMP/out" \
             node/scripts/oci-artifact.sh > "$RUNNER_TEMP/out/console.entry.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -594,7 +597,11 @@ jobs:
           tar -xJf "$RUNNER_TEMP/typst.tar.xz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/typst-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
       - name: The figures
+        # The back office's table cards are rendered from its PDF with
+        # poppler's pdftoppm, which the hosted image does not carry.
         run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq poppler-utils
           img="$GITHUB_WORKSPACE/docs/docs/manuals/img"
           mkdir -p "$img"
           for app in cashier manager; do
