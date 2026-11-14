@@ -53,7 +53,7 @@ security import "$work/cert.p12" -k "$keychain" -P "$P12_PASSWORD" -T /usr/bin/c
 security set-key-partition-list -S apple-tool:,apple: -s -k "$kc_password" "$keychain" >/dev/null
 existing=()
 while IFS= read -r k; do existing+=("$k"); done < <(security list-keychains -d user | sed 's/^ *"//; s/"$//')
-security list-keychains -d user -s "$keychain" "${existing[@]}"
+security list-keychains -d user -s "$keychain" ${existing[@]+"${existing[@]}"}
 
 security cms -D -i "$work/profile.mobileprovision" > "$work/profile.plist"
 uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$work/profile.plist")"
@@ -81,7 +81,7 @@ cd "$src"
 flutter pub get --enforce-lockfile
 defines=()
 [ "$app" = cashier ] && defines=(--dart-define=CASHIER_VERSION="$version")
-flutter build ios --release --no-codesign --build-name="$marketing" --build-number="$build" "${defines[@]}"
+flutter build ios --release --no-codesign --build-name="$marketing" --build-number="$build" ${defines[@]+"${defines[@]}"}
 # The signing settings go to the Runner target only, through the xcconfig
 # its Release configuration is based on: on xcodebuild's command line they
 # would reach every target, and the Swift packages' targets (one per
