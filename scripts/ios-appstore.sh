@@ -27,6 +27,11 @@ out="${7:?out dir}"
 grep -Eq '^[1-9][0-9]*$' <<<"$build" || { echo "ios-appstore: the build number $build is not a whole number" >&2; exit 2; }
 marketing="${version%%-*}"
 : "${P12:?}" "${P12_PASSWORD:?}" "${PROFILE:?}" "${TEAM:?}"
+# A secret pasted into GitHub's form often keeps the line break that ended
+# it. Base64 ignores it, a password does not: drop trailing line breaks.
+while [ "${P12_PASSWORD%$'\n'}" != "$P12_PASSWORD" ] || [ "${P12_PASSWORD%$'\r'}" != "$P12_PASSWORD" ]; do
+  P12_PASSWORD="${P12_PASSWORD%$'\n'}"; P12_PASSWORD="${P12_PASSWORD%$'\r'}"
+done
 work="$(mktemp -d)"
 keychain="$work/build.keychain-db"
 profiles="$HOME/Library/MobileDevice/Provisioning Profiles"
