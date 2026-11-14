@@ -4,7 +4,7 @@
 # one sentence on what is and is not code-signed, and <out>/release.md, the
 # GitHub Release's body (the English notes, the files and how to check them).
 #
-#   scripts/release-notes.sh <version> <docs releases dir> <signed dir> <mobile dir> <notes text> <out dir>
+#   scripts/release-notes.sh <version> <docs releases dir> <signed dir> <mobile dir> <notes text> <out dir> [<guides dir>]
 #
 # <signed dir> holds <app>-<platform>.signed files, each "signed" or
 # "unsigned", written by the desktop builds.
@@ -15,6 +15,7 @@ signed_dir="${3:?signed dir}"
 mobile_dir="${4:?mobile dir}"
 notes="${5-}"
 out="${6:?out dir}"
+guides_dir="${7-}"
 mkdir -p "$out"
 
 for lang in en ru; do
@@ -69,6 +70,10 @@ add_once "$out/ru.md" "$ru"
   if compgen -G "$mobile_dir/*" >/dev/null; then
     echo "- Phones and handhelds (outside the signed manifest; see \`SHA256SUMS\`):"
     for f in "$mobile_dir"/*; do echo "  - \`${f##*/}\`"; done
+  fi
+  if [ -n "$guides_dir" ] && compgen -G "$guides_dir/*.pdf" >/dev/null; then
+    echo "- Guides (PDF, \`en\` English, \`ru\` Russian): \`guide-admin-…\` installing and running a store's server or a hub (the containers), the gateway, backups and updates; \`guide-cashier-…\` the register; \`guide-manager-…\` the back office and the hub's console; \`guide-hardware-…\` connecting devices; \`guide-us-pack-…\` what a US store adds:"
+    for f in "$guides_dir"/*.pdf; do echo "  - \`${f##*/}\`"; done
   fi
   echo "- \`SHA256SUMS\`: the SHA-256 of every file here."
   if [ -f "$out/ru.md" ]; then

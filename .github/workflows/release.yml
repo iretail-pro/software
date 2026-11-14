@@ -547,6 +547,80 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  guides:
+    # The PDF guides (docs/manuals): the figures are taken by the register's
+    # and the back office's own screen tests at this release's commits, then
+    # Typst builds every guide in English and Russian. No secret but the
+    # sources token, which only checks the repositories out.
+    needs: plan
+    runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 90
+    env:
+      TYPST_VERSION: 0.15.1
+      TYPST_SHA256: a6d077d0a95eed5a2eba715b2dae06be954f624ccbf85758a03f389ded33118c
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/docs
+          ref: ${{ needs.plan.outputs.docs }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          path: docs
+          persist-credentials: false
+          sparse-checkout: docs/manuals
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/cashier
+          ref: ${{ needs.plan.outputs.cashier }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          path: cashier
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/manager
+          ref: ${{ needs.plan.outputs.manager }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          path: manager
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: false
+      - name: Typst
+        run: |
+          curl -sSLfo "$RUNNER_TEMP/typst.tar.xz" \
+            "https://github.com/typst/typst/releases/download/v$TYPST_VERSION/typst-x86_64-unknown-linux-musl.tar.xz"
+          echo "$TYPST_SHA256  $RUNNER_TEMP/typst.tar.xz" | sha256sum --strict -c
+          tar -xJf "$RUNNER_TEMP/typst.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/typst-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+      - name: The figures
+        run: |
+          img="$GITHUB_WORKSPACE/docs/docs/manuals/img"
+          mkdir -p "$img"
+          for app in cashier manager; do
+            (cd "$app" && flutter pub get --enforce-lockfile &&
+              MANUAL_SHOTS_DIR="$img" flutter test --concurrency=2 test/manual_shots_test.dart)
+          done
+          echo "$(find "$img" -name '*.png' | wc -l) figures"
+      - name: The guides
+        env:
+          IRETAIL_FONTS: ${{ github.workspace }}/cashier/assets/fonts
+        run: |
+          docs/docs/manuals/build.sh
+          mkdir -p "$RUNNER_TEMP/guides"
+          for pdf in docs/docs/manuals/out/*.pdf; do
+            base="${pdf##*/}"; base="${base%.pdf}"
+            cp "$pdf" "$RUNNER_TEMP/guides/guide-${base%-*}-$VERSION-${base##*-}.pdf"
+          done
+          ls -l "$RUNNER_TEMP/guides"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: guides
+          path: ${{ runner.temp }}/guides/*.pdf
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
   android:
     needs: plan
     name: android ${{ matrix.app }}
@@ -832,7 +906,7 @@ jobs:
           retention-days: 1
 
   publish:
-    needs: [plan, assemble, sign, android, ios]
+    needs: [plan, assemble, sign, android, ios, guides]
     # android and ios may skip their builds; they still end in success.
     runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
     timeout-minutes: 60
@@ -886,6 +960,10 @@ jobs:
         with:
           name: manifest-signed
           path: ${{ runner.temp }}/release
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: guides
+          path: ${{ runner.temp }}/release/guides
       - name: Verify
         # No secret in this step's environment.
         env:
@@ -916,12 +994,13 @@ jobs:
             --artifacts "$WORK/files" --out "$WORK/iretail-$VERSION.tar"
           tar -tf "$WORK/iretail-$VERSION.tar" | sed -n 1p | grep -qx manifest.json ||
             { echo "::error::the bundle's first member is not manifest.json"; exit 1; }
-          software/scripts/release-notes.sh "$VERSION" docs/docs/releases "$WORK/signed" "$WORK/mobile" "$NOTES" "$WORK/notes"
+          software/scripts/release-notes.sh "$VERSION" docs/docs/releases "$WORK/signed" "$WORK/mobile" "$NOTES" "$WORK/notes" "$WORK/guides"
           (
             cd "$WORK"
             : > SHA256SUMS
             (cd files && sha256sum -- *) >> SHA256SUMS
             if compgen -G 'mobile/*' >/dev/null; then (cd mobile && sha256sum -- *) >> SHA256SUMS; fi
+            (cd guides && sha256sum -- *) >> SHA256SUMS
             sha256sum manifest.json version.json "iretail-$VERSION.tar" >> SHA256SUMS
           )
           cat "$WORK/SHA256SUMS"
@@ -934,6 +1013,7 @@ jobs:
           args=(--repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "iRetail PRO $VERSION" --notes-file "$WORK/notes/release.md" --draft)
           assets=("$WORK"/files/* "$WORK/manifest.json" "$WORK/version.json" "$WORK/SHA256SUMS" "$WORK/iretail-$VERSION.tar")
           if compgen -G "$WORK/mobile/*" >/dev/null; then assets+=("$WORK"/mobile/*); fi
+          assets+=("$WORK"/guides/*.pdf)
           for lang in en ru; do
             [ -f "$WORK/notes/$lang.md" ] && cp "$WORK/notes/$lang.md" "$WORK/notes-$lang.md" && assets+=("$WORK/notes-$lang.md")
           done
@@ -1004,7 +1084,7 @@ jobs:
     # (the builds, the manifests, the tool and an App Store build only),
     # but none is needed once the run ends: delete them all, whatever the
     # run's outcome.
-    needs: [plan, node-image, updater-image, console-image, tool, gateway, desktop, kit, android, ios, assemble, sign, publish, testflight]
+    needs: [plan, node-image, updater-image, console-image, tool, gateway, desktop, kit, guides, android, ios, assemble, sign, publish, testflight]
     if: always()
     runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
     timeout-minutes: 10

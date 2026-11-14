@@ -14,10 +14,18 @@ Each release `v<version>` carries:
 | `cashier-<version>-android.apk`, `manager-<version>-android.apk`, `customer-<version>-android.apk` | the register, the back office and the customer app on Android; the customer app is the example chain, Corner Market (a chain's own build comes from `brands/`). The iPhone builds of the three go to TestFlight instead |
 | `gateway-<version>-linux-x64.tar.gz`, `-linux-arm64.tar.gz`, `-windows-x64.zip`, `-macos-universal.tar.gz` | the device gateway |
 | `node-…`, `updater-…`, `console-<version>-linux-x64.oci.tar` | the images, also on `ghcr.io/iretail-pro/software/node`, `software/updater`, `software/console` |
+| `guide-admin-<version>-en.pdf`, `-ru.pdf` | the administrator's guide: installing and running a store's server or a hub (the containers), the gateway, pairing, backups, updates |
+| `guide-cashier-…`, `guide-manager-…`, `guide-hardware-…`, `guide-us-pack-…` (`en`, `ru`) | the register's, the back office's and console's, the devices' and the US pack's guides |
 | `iretail-deploy-<version>.tar.gz` | the deployment kit: compose files, Helm chart, Terraform, install scripts |
 | `manifest.json` | the signed manifest: every file above but the phone builds, with its SHA-256 and size |
 | `iretail-<version>.tar` | the air-gapped bundle for `node release import` at a hub |
 | `SHA256SUMS`, `version.json`, `notes-en.md`, `notes-ru.md` | |
+
+The guides are built by each release from docs' `docs/manuals` at the
+release's commit, their figures taken by the register's and the back
+office's screen tests at theirs, so a guide always shows the version it
+ships with. They are outside the signed manifest and checked by
+`SHA256SUMS`.
 
 A store, a hub and the apps check `manifest.json` against the release keys
 they embed (contracts `spec/RELEASES.md`); the phone builds are outside the

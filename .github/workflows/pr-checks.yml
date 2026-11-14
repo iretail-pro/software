@@ -29,9 +29,11 @@ jobs:
       - name: release notes script
         run: |
           t="$(mktemp -d)"
-          mkdir -p "$t/signed" "$t/mobile" "$t/docs"
+          mkdir -p "$t/signed" "$t/mobile" "$t/docs" "$t/guides"
+          : > "$t/guides/guide-admin-9.9.9-en.pdf"
           echo unsigned > "$t/signed/cashier-windows-x64.signed"
           echo signed > "$t/signed/cashier-macos-universal.signed"
-          scripts/release-notes.sh 9.9.9 "$t/docs" "$t/signed" "$t/mobile" "Test notes" "$t/out"
+          scripts/release-notes.sh 9.9.9 "$t/docs" "$t/signed" "$t/mobile" "Test notes" "$t/out" "$t/guides"
           grep -q "Windows installers of this release are not code-signed" "$t/out/en.md"
           grep -q '^## Files' "$t/out/release.md"
+          grep -q 'guide-admin-9.9.9-en.pdf' "$t/out/release.md"
