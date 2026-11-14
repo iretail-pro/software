@@ -24,9 +24,10 @@
 #   kit       the deployment kit (deploy's scripts/build-kit.sh)
 #   android, ios
 #             the register for phones and handhelds without a brand: a
-#             signed APK, and an ad hoc IPA; outside the signed manifest
-#             (contracts spec/RELEASES.md names no mobile platform), so
-#             listed in SHA256SUMS; each skipped, with a note, until its
+#             signed APK in the release (outside the signed manifest:
+#             contracts spec/RELEASES.md names no mobile platform; listed
+#             in SHA256SUMS), and an App Store build the testflight job
+#             uploads after publish; each skipped, with a note, until its
 #             signing secrets are set
 #   assemble  no secret: the fragment (manager's tool/release-fragment.py
 #             over every file, deploy's kit fragment) and `iretail-release
@@ -50,7 +51,8 @@
 # AZURE_CLIENT_ID, AZURE_CLIENT_SECRET (Windows); ANDROID_KEYSTORE,
 # ANDROID_STORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD (Android);
 # IOS_CERTIFICATE_P12, IOS_CERTIFICATE_PASSWORD, IOS_PROVISIONING_PROFILE,
-# IOS_TEAM_ID (iOS ad hoc). Variables: IRETAIL_LICENSE_PUBLIC_KEY,
+# IOS_TEAM_ID (iOS, an App Store profile; the upload uses the APPLE_API_*
+# key of the macOS set). Variables: IRETAIL_LICENSE_PUBLIC_KEY,
 # IRETAIL_RELEASE_KEY_ID, IRETAIL_RELEASE_PUBLIC_KEYS,
 # ARTIFACT_SIGNING_ENDPOINT, ARTIFACT_SIGNING_ACCOUNT,
 # ARTIFACT_SIGNING_PROFILE.
@@ -597,6 +599,8 @@ jobs:
     needs: plan
     runs-on: ${{ fromJSON(vars.RUNNER_MACOS || '"macos-latest"') }}
     timeout-minutes: 60
+    outputs:
+      built: ${{ steps.secrets.outputs.build }}
     steps:
       - name: Signing secrets
         id: secrets
@@ -633,18 +637,22 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: false
-      - name: Build, sign ad hoc, export
+      - name: Build, sign for App Store Connect, export
         if: steps.secrets.outputs.build == 'true'
         env:
           P12: ${{ secrets.IOS_CERTIFICATE_P12 }}
           P12_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
           PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
           TEAM: ${{ secrets.IOS_TEAM_ID }}
-        run: software/scripts/ios-adhoc.sh src "$VERSION" "$RUNNER_TEMP/out"
+          # Grows with every run, and with a re-run of the same run.
+          BUILD_NUMBER: ${{ github.run_number }}${{ github.run_attempt }}
+        run: software/scripts/ios-appstore.sh src "$VERSION" "$BUILD_NUMBER" "$RUNNER_TEMP/out"
+      # Not a release file: the testflight job uploads it once the release
+      # is published (named outside the mobile-* pattern on purpose).
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.secrets.outputs.build == 'true'
         with:
-          name: mobile-ios
+          name: testflight-ipa
           path: ${{ runner.temp }}/out
           if-no-files-found: error
           retention-days: 1
@@ -881,3 +889,36 @@ jobs:
           done
           gh release create "v$VERSION" "${args[@]}" "${assets[@]}"
           echo "Released [v$VERSION]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/v$VERSION)" >> "$GITHUB_STEP_SUMMARY"
+
+  testflight:
+    # The register for iPhone goes to TestFlight, never into the GitHub
+    # Release: an App Store build installs on no device by itself. After
+    # publish, so nothing leaves this run before the manifest is signed.
+    needs: [publish, ios]
+    if: needs.ios.outputs.built == 'true'
+    runs-on: ${{ fromJSON(vars.RUNNER_MACOS || '"macos-latest"') }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: testflight-ipa
+          path: ${{ runner.temp }}/ipa
+      - name: Upload to App Store Connect
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          for v in APPLE_API_KEY_P8 APPLE_API_KEY_ID APPLE_API_ISSUER_ID; do
+            [ -n "${!v}" ] || { echo "::error::$v is not set: TestFlight needs the App Store Connect API key"; exit 1; }
+          done
+          # altool reads the key from this folder by its id; removed below.
+          keys="$HOME/.appstoreconnect/private_keys"
+          mkdir -p "$keys"
+          trap 'rm -rf "$keys"' EXIT
+          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$keys/AuthKey_$APPLE_API_KEY_ID.p8"
+          ipa="$(find "$RUNNER_TEMP/ipa" -maxdepth 1 -name '*.ipa' | head -n 1)"
+          [ -n "$ipa" ] || { echo "::error::no .ipa to upload"; exit 1; }
+          xcrun altool --upload-app --type ios --file "$ipa" \
+            --apiKey "$APPLE_API_KEY_ID" --apiIssuer "$APPLE_API_ISSUER_ID"
+          echo "- iOS: \`${ipa##*/}\` uploaded to App Store Connect; it reaches TestFlight once Apple has processed it." >> "$GITHUB_STEP_SUMMARY"

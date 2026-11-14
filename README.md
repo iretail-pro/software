@@ -11,7 +11,7 @@ Each release `v<version>` carries:
 |---|---|
 | `cashier-<version>-linux-x64.tar.gz`, `-windows-x64.zip`, `-macos-universal.zip` | the register |
 | `manager-<version>-…` | the back office (also served by a hub as its web console) |
-| `cashier-<version>-android.apk`, `cashier-<version>-ios.ipa` | the register on phones and handhelds (iOS ad hoc: installs only on the devices its profile lists) |
+| `cashier-<version>-android.apk` | the register on Android phones and handhelds (the iPhone build goes to TestFlight instead) |
 | `gateway-<version>-linux-x64.tar.gz`, `-linux-arm64.tar.gz`, `-windows-x64.zip`, `-macos-universal.tar.gz` | the device gateway |
 | `node-…`, `updater-…`, `console-<version>-linux-x64.oci.tar` | the images, also on `ghcr.io/iretail-pro/software/node`, `software/updater`, `software/console` |
 | `iretail-deploy-<version>.tar.gz` | the deployment kit: compose files, Helm chart, Terraform, install scripts |
@@ -50,7 +50,7 @@ and says so; with part of it the run fails.
 | `MACOS_CERTIFICATE_P12`, `MACOS_CERTIFICATE_PASSWORD`, `MACOS_SIGN_IDENTITY`, `APPLE_API_KEY_P8`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID` | Developer ID signing and notarization of the macOS apps |
 | `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` | Windows signing (Artifact Signing) |
 | `ANDROID_KEYSTORE` (base64), `ANDROID_STORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` | the Android APK |
-| `IOS_CERTIFICATE_P12` (base64), `IOS_CERTIFICATE_PASSWORD`, `IOS_PROVISIONING_PROFILE` (base64, ad hoc, bundle id `pro.iretail.iretailCashier`), `IOS_TEAM_ID` | the iOS IPA |
+| `IOS_CERTIFICATE_P12` (base64, Apple Distribution), `IOS_CERTIFICATE_PASSWORD`, `IOS_PROVISIONING_PROFILE` (base64, App Store, bundle id `pro.iretail.iretailCashier`), `IOS_TEAM_ID` | the register for iPhone, uploaded to TestFlight after publish with the `APPLE_API_*` key; the app's record must exist in App Store Connect |
 
 Variables: `IRETAIL_LICENSE_PUBLIC_KEY` (the license issuer's public key,
 compiled into the node), `IRETAIL_RELEASE_KEY_ID` (`release-1`),
