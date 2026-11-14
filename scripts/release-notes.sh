@@ -65,7 +65,7 @@ add_once "$out/ru.md" "$ru"
   echo "- \`manifest.json\`: the signed release manifest. Every file of the release is listed in it with its SHA-256 and size; the apps, the node and the updater check it with the release keys they embed."
   echo "- \`iretail-$version.tar\`: the air-gapped bundle (the manifest and every artifact), for \`node release import\` at a hub."
   echo "- \`iretail-deploy-$version.tar.gz\`: the deployment kit (compose files, chart, install scripts)."
-  echo "- Container images: \`ghcr.io/iretail-pro/node:$version\`, \`updater:$version\`, \`console:$version\`, by the digests in the manifest."
+  echo "- Container images: \`ghcr.io/iretail-pro/software/node:$version\`, \`software/updater:$version\`, \`software/console:$version\`, by the digests in the manifest."
   if compgen -G "$mobile_dir/*" >/dev/null; then
     echo "- Phones and handhelds (outside the signed manifest; see \`SHA256SUMS\`):"
     for f in "$mobile_dir"/*; do echo "  - \`${f##*/}\`"; done

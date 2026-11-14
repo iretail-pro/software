@@ -95,7 +95,7 @@ defaults:
 env:
   VERSION: ${{ inputs.version }}
   FLUTTER_VERSION: 3.47.7
-  REGISTRY: ghcr.io/iretail-pro
+  REGISTRY: ghcr.io/iretail-pro/software
 
 jobs:
   plan:

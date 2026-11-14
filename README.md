@@ -13,7 +13,7 @@ Each release `v<version>` carries:
 | `manager-<version>-…` | the back office (also served by a hub as its web console) |
 | `cashier-<version>-android.apk`, `cashier-<version>-ios.ipa` | the register on phones and handhelds (iOS ad hoc: installs only on the devices its profile lists) |
 | `gateway-<version>-linux-x64.tar.gz`, `-linux-arm64.tar.gz`, `-windows-x64.zip`, `-macos-universal.tar.gz` | the device gateway |
-| `node-…`, `updater-…`, `console-<version>-linux-x64.oci.tar` | the images, also on `ghcr.io/iretail-pro/node`, `updater`, `console` |
+| `node-…`, `updater-…`, `console-<version>-linux-x64.oci.tar` | the images, also on `ghcr.io/iretail-pro/software/node`, `software/updater`, `software/console` |
 | `iretail-deploy-<version>.tar.gz` | the deployment kit: compose files, Helm chart, Terraform, install scripts |
 | `manifest.json` | the signed manifest: every file above but the phone builds, with its SHA-256 and size |
 | `iretail-<version>.tar` | the air-gapped bundle for `node release import` at a hub |
@@ -60,12 +60,12 @@ compiled into the node), `IRETAIL_RELEASE_KEY_ID` (`release-1`),
 
 ## Images
 
-The images keep the names the deployment, the chart and the manifests use:
-`ghcr.io/iretail-pro/node`, `updater`, `console`. Those packages already
-exist, made by the source repositories' workflows, so once: in each
-package's settings, give this repository **Write** under "Manage Actions
-access", and set its visibility to **Public**. A package this run creates
-for the first time is linked to this repository; make it public the same way.
+The images are this repository's own packages:
+`ghcr.io/iretail-pro/software/node`, `software/updater` and
+`software/console`, tagged `<version>` and pushed by the digests the
+manifest names. The first release creates them; then, once, set each
+package's visibility to **Public** (its Package settings). The manifest
+names these repositories, so a store's updater pulls them from here.
 
 ## Runners
 
