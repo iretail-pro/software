@@ -137,7 +137,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          # A draft is what a failed run left behind; the publish job replaces it.
+          draft="$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>/dev/null || true)"
+          if [ "$draft" = false ]; then
             echo "::error::v$VERSION is released already; a release is never rebuilt"; exit 1
           fi
       - name: The source commits
@@ -923,6 +925,23 @@ jobs:
             sha256sum manifest.json version.json "iretail-$VERSION.tar" >> SHA256SUMS
           )
           cat "$WORK/SHA256SUMS"
+      - name: The GitHub Release, as a draft
+        # A draft is seen only by the repository's writers: if a push below
+        # fails, nothing public is left half done and the run can go again.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=(--repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "iRetail PRO $VERSION" --notes-file "$WORK/notes/release.md" --draft)
+          assets=("$WORK"/files/* "$WORK/manifest.json" "$WORK/version.json" "$WORK/SHA256SUMS" "$WORK/iretail-$VERSION.tar")
+          if compgen -G "$WORK/mobile/*" >/dev/null; then assets+=("$WORK"/mobile/*); fi
+          for lang in en ru; do
+            [ -f "$WORK/notes/$lang.md" ] && cp "$WORK/notes/$lang.md" "$WORK/notes-$lang.md" && assets+=("$WORK/notes-$lang.md")
+          done
+          # A draft left by an earlier failed run of this version goes first.
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>/dev/null | grep -qx true; then
+            gh release delete "v$VERSION" --repo "$GITHUB_REPOSITORY" --yes
+          fi
+          gh release create "v$VERSION" "${args[@]}" "${assets[@]}"
       - name: Push the images by digest
         env:
           GH_TOKEN: ${{ github.token }}
@@ -932,19 +951,13 @@ jobs:
               software/scripts/push-image.sh "$WORK/files/$name" "$image" "$VERSION" "$digest"
               echo "- \`$image:$VERSION\` = \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
             done
-      - name: The GitHub Release
+      - name: Publish the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           PRERELEASE: ${{ needs.plan.outputs.prerelease }}
         run: |
-          args=(--repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "iRetail PRO $VERSION" --notes-file "$WORK/notes/release.md")
-          [ "$PRERELEASE" = true ] && args+=(--prerelease) || args+=(--latest)
-          assets=("$WORK"/files/* "$WORK/manifest.json" "$WORK/version.json" "$WORK/SHA256SUMS" "$WORK/iretail-$VERSION.tar")
-          if compgen -G "$WORK/mobile/*" >/dev/null; then assets+=("$WORK"/mobile/*); fi
-          for lang in en ru; do
-            [ -f "$WORK/notes/$lang.md" ] && cp "$WORK/notes/$lang.md" "$WORK/notes-$lang.md" && assets+=("$WORK/notes-$lang.md")
-          done
-          gh release create "v$VERSION" "${args[@]}" "${assets[@]}"
+          if [ "$PRERELEASE" = true ]; then flags=(--prerelease); else flags=(--latest); fi
+          gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false "${flags[@]}"
           echo "Released [v$VERSION]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/v$VERSION)" >> "$GITHUB_STEP_SUMMARY"
 
   testflight:
@@ -984,3 +997,26 @@ jobs:
               --apiKey "$APPLE_API_KEY_ID" --apiIssuer "$APPLE_API_ISSUER_ID"
             echo "- iOS: \`${ipa##*/}\` uploaded to App Store Connect; it reaches TestFlight once Apple has processed it." >> "$GITHUB_STEP_SUMMARY"
           done
+
+  cleanup:
+    # This repository is public, so its runs' artifacts can be downloaded by
+    # anyone signed in to GitHub while they are kept. None holds a secret
+    # (the builds, the manifests, the tool and an App Store build only),
+    # but none is needed once the run ends: delete them all, whatever the
+    # run's outcome.
+    needs: [plan, node-image, updater-image, console-image, tool, gateway, desktop, kit, android, ios, assemble, sign, publish, testflight]
+    if: always()
+    runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 10
+    permissions:
+      actions: write
+    steps:
+      - name: Delete this run's artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" -q '.artifacts[] | "\(.id) \(.name)"' |
+            while read -r id name; do
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"
+              echo "deleted $name"
+            done
