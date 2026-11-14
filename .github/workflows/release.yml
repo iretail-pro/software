@@ -1,0 +1,986 @@
+# Builds, signs and publishes a release of iRetail PRO from the source
+# repositories, by hand only (workflow_dispatch): publishing is the owner's
+# decision, never a side effect of a push. README, "Releasing".
+#
+# Every source repository is private; this one is public, so what it
+# publishes (a GitHub Release and the images on ghcr.io) can be downloaded
+# without a token, and GitHub's hosted runners (macOS included) cost no
+# minutes here. The sources are checked out read-only with the secret
+# IRETAIL_SOURCES_TOKEN at the commits the plan job resolves once, so every
+# job builds the same commits; their builds use the repositories' own
+# scripts (tool/release-archive.sh, scripts/release-build.sh,
+# scripts/build-kit.sh, ...). Nothing leaves this run before the manifest
+# is signed: the jobs hand each other GitHub artifacts kept for one day.
+#
+#   plan      the version, the source commits, each repository's version
+#             equal to it, not released already
+#   node-image, updater-image, console-image
+#             OCI image layouts saved as tars (scripts/image.sh), not pushed
+#   tool      iretail-release (data-exchange-node), linux-x64
+#   gateway   the gateway's archives, four platforms
+#   desktop   the register (cashier) and the back office (manager) for
+#             Linux, Windows and macOS; macOS signed and notarized and
+#             Windows signed when their secrets are set
+#   kit       the deployment kit (deploy's scripts/build-kit.sh)
+#   android, ios
+#             the register for phones and handhelds without a brand: a
+#             signed APK in the release (outside the signed manifest:
+#             contracts spec/RELEASES.md names no mobile platform; listed
+#             in SHA256SUMS), and an App Store build the testflight job
+#             uploads after publish; each skipped, with a note, until its
+#             signing secrets are set
+#   assemble  no secret: the fragment (manager's tool/release-fragment.py
+#             over every file, deploy's kit fragment) and `iretail-release
+#             assemble`, every file checked against its entry
+#   sign      the environment `release` and the release key only, with
+#             nothing checked out but deploy's scripts/sign-manifest.sh
+#   publish   verifies the signed manifest (openssl and the tool), writes
+#             version.json, the notes and the air-gapped bundle, pushes the
+#             images by digest to ghcr.io and creates the GitHub Release
+#             v<version>; only what users download is published here, not
+#             the site
+#
+# Not here (README, "What deploy's release still does"): release gates 1 to
+# 3 and the rotation release's two runs.
+#
+# Secrets: IRETAIL_SOURCES_TOKEN (a fine-grained token, Contents: read, on
+# the organization's source repositories); in the environment `release`:
+# IRETAIL_RELEASE_KEY. Optional: MACOS_CERTIFICATE_P12,
+# MACOS_CERTIFICATE_PASSWORD, MACOS_SIGN_IDENTITY, APPLE_API_KEY_P8,
+# APPLE_API_KEY_ID, APPLE_API_ISSUER_ID (macOS); AZURE_TENANT_ID,
+# AZURE_CLIENT_ID, AZURE_CLIENT_SECRET (Windows); ANDROID_KEYSTORE,
+# ANDROID_STORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD (Android);
+# IOS_CERTIFICATE_P12, IOS_CERTIFICATE_PASSWORD, IOS_PROVISIONING_PROFILE,
+# IOS_TEAM_ID (iOS, an App Store profile; the upload uses the APPLE_API_*
+# key of the macOS set). Variables: IRETAIL_LICENSE_PUBLIC_KEY,
+# IRETAIL_RELEASE_KEY_ID, IRETAIL_RELEASE_PUBLIC_KEYS,
+# ARTIFACT_SIGNING_ENDPOINT, ARTIFACT_SIGNING_ACCOUNT,
+# ARTIFACT_SIGNING_PROFILE.
+#
+# Runners: the variables RUNNER, RUNNER_WINDOWS and RUNNER_MACOS (a runs-on
+# value as JSON), GitHub's hosted runners when unset. This repository is
+# public: set its own variable RUNNER to "ubuntu-latest" so the
+# organization's self-hosted runner is never offered to it (README,
+# "Runners").
+#
+# Third-party actions are pinned by commit; every secret reaches only the
+# steps that use it; checkouts keep no credentials; every step runs in bash
+# with pipefail.
+name: release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The release's version (MAJOR.MINOR.PATCH[-pre-release], lower case); every source repository must carry it
+        required: true
+        type: string
+      sources:
+        description: The source repositories' branch to build (their commits are fixed by the plan job)
+        type: string
+        default: main
+      starter_only:
+        description: Build the node without the license issuer's key (every node runs as Starter)
+        type: boolean
+        default: false
+      notes:
+        description: The release notes in English, when docs has none for this version
+        type: string
+        default: ""
+concurrency:
+  group: release
+  cancel-in-progress: false
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+env:
+  VERSION: ${{ inputs.version }}
+  FLUTTER_VERSION: 3.47.7
+  REGISTRY: ghcr.io/iretail-pro/software
+
+jobs:
+  plan:
+    runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 15
+    outputs:
+      node: ${{ steps.commits.outputs.data-exchange-node }}
+      cashier: ${{ steps.commits.outputs.cashier }}
+      manager: ${{ steps.commits.outputs.manager }}
+      customer: ${{ steps.commits.outputs.customer-app }}
+      gateway: ${{ steps.commits.outputs.device-gateway }}
+      deploy: ${{ steps.commits.outputs.deploy }}
+      docs: ${{ steps.commits.outputs.docs }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - name: From main only
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          [ "$REF" = refs/heads/main ] || { echo "::error::a release is built from main only, not $REF"; exit 1; }
+      - name: Version
+        id: version
+        env:
+          KEY: ${{ vars.IRETAIL_LICENSE_PUBLIC_KEY }}
+          STARTER_ONLY: ${{ inputs.starter_only }}
+        run: |
+          ident='(0|[1-9][0-9]*|[0-9]*[a-z-][0-9a-z-]*)'
+          grep -Eq "^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-$ident(\.$ident)*)?\$" <<<"$VERSION" ||
+            { echo "::error::$VERSION is not MAJOR.MINOR.PATCH[-pre-release] in lower case"; exit 1; }
+          case "$VERSION" in *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;; *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;; esac
+          if [ -z "$KEY" ]; then
+            [ "$STARTER_ONLY" = true ] || { echo "::error::the variable IRETAIL_LICENSE_PUBLIC_KEY is not set; set it or run with starter_only"; exit 1; }
+          elif ! grep -Eq '^[0-9a-fA-F]{64}$' <<<"$KEY"; then
+            echo "::error::IRETAIL_LICENSE_PUBLIC_KEY is not 64 hex digits"; exit 1
+          fi
+      - name: Not released already
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::v$VERSION is released already; a release is never rebuilt"; exit 1
+          fi
+      - name: The source commits
+        id: commits
+        env:
+          TOKEN: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          BRANCH: ${{ inputs.sources }}
+        run: |
+          [ -n "$TOKEN" ] || { echo "::error::the secret IRETAIL_SOURCES_TOKEN is not set (README, \"Secrets\")"; exit 1; }
+          {
+            echo "### Sources of $VERSION"
+            echo
+            echo '| Repository | Commit |'
+            echo '|---|---|'
+          } >> "$GITHUB_STEP_SUMMARY"
+          for repo in data-exchange-node cashier manager customer-app device-gateway deploy docs; do
+            sha="$(git -c "http.extraHeader=Authorization: Basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)" \
+              ls-remote "https://github.com/iretail-pro/$repo" "refs/heads/$BRANCH" | cut -f1)"
+            grep -Eq '^[0-9a-f]{40}$' <<<"$sha" || { echo "::error::iretail-pro/$repo has no branch $BRANCH the token can read"; exit 1; }
+            echo "$repo=$sha" >> "$GITHUB_OUTPUT"
+            echo "| iretail-pro/$repo | \`$sha\` |" >> "$GITHUB_STEP_SUMMARY"
+          done
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/data-exchange-node
+          ref: ${{ steps.commits.outputs.data-exchange-node }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          path: src/data-exchange-node
+          persist-credentials: false
+          sparse-checkout: Cargo.toml
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/cashier
+          ref: ${{ steps.commits.outputs.cashier }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          path: src/cashier
+          persist-credentials: false
+          sparse-checkout: pubspec.yaml
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/manager
+          ref: ${{ steps.commits.outputs.manager }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          path: src/manager
+          persist-credentials: false
+          sparse-checkout: pubspec.yaml
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/customer-app
+          ref: ${{ steps.commits.outputs.customer-app }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          path: src/customer-app
+          persist-credentials: false
+          sparse-checkout: pubspec.yaml
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/device-gateway
+          ref: ${{ steps.commits.outputs.device-gateway }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          path: src/device-gateway
+          persist-credentials: false
+          sparse-checkout: VERSION
+      - name: Every repository carries the version
+        run: |
+          node="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' src/data-exchange-node/Cargo.toml)"
+          cashier="$(sed -n 's/^version: \([^+]*\).*/\1/p' src/cashier/pubspec.yaml)"
+          manager="$(sed -n 's/^version: \([^+]*\).*/\1/p' src/manager/pubspec.yaml)"
+          customer="$(sed -n 's/^version: \([^+]*\).*/\1/p' src/customer-app/pubspec.yaml)"
+          gateway="$(tr -d '[:space:]' < src/device-gateway/VERSION)"
+          bad=0
+          for pair in "data-exchange-node=$node" "cashier=$cashier" "manager=$manager" "customer-app=$customer" "device-gateway=$gateway"; do
+            echo "${pair%%=*}: ${pair#*=}"
+            [ "${pair#*=}" = "$VERSION" ] || { echo "::error::${pair%%=*} is at ${pair#*=}, not $VERSION"; bad=1; }
+          done
+          exit "$bad"
+
+  node-image:
+    needs: plan
+    runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
+    # The node's release build takes 24 minutes or more on a hosted runner.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/data-exchange-node
+          ref: ${{ needs.plan.outputs.node }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          path: src
+          persist-credentials: false
+      - name: Build and start
+        env:
+          KEY: ${{ vars.IRETAIL_LICENSE_PUBLIC_KEY }}
+          SOURCE_COMMIT: ${{ needs.plan.outputs.node }}
+        run: |
+          scripts/image.sh node src Dockerfile "$VERSION" "$REGISTRY/node" hub,store "$RUNNER_TEMP/out" \
+            src/scripts/oci-artifact.sh > "$RUNNER_TEMP/out/node.entry.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: files-node-image
+          path: ${{ runner.temp }}/out/*.oci.tar
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  updater-image:
+    needs: plan
+    runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/data-exchange-node
+          ref: ${{ needs.plan.outputs.node }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          path: src
+          persist-credentials: false
+      - name: Build and start (the updater and updater-proxy, one image)
+        env:
+          SOURCE_COMMIT: ${{ needs.plan.outputs.node }}
+        run: |
+          scripts/image.sh updater src Dockerfile.updater "$VERSION" "$REGISTRY/updater" hub,store "$RUNNER_TEMP/out" \
+            src/scripts/oci-artifact.sh > "$RUNNER_TEMP/out/updater.entry.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: files-updater-image
+          path: ${{ runner.temp }}/out/*.oci.tar
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  console-image:
+    needs: plan
+    runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/manager
+          ref: ${{ needs.plan.outputs.manager }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          path: src
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/data-exchange-node
+          ref: ${{ needs.plan.outputs.node }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          path: node
+          persist-credentials: false
+          sparse-checkout: scripts/oci-artifact.sh
+          sparse-checkout-cone-mode: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: false
+      - name: Build the browser app
+        working-directory: src
+        # The engine's files bundled, no CDN: a hub may have no internet.
+        run: |
+          flutter pub get --enforce-lockfile
+          flutter build web --release --no-web-resources-cdn
+      - name: Build the image
+        env:
+          SOURCE_COMMIT: ${{ needs.plan.outputs.manager }}
+        run: |
+          scripts/image.sh console src console/Dockerfile "$VERSION" "$REGISTRY/console" hub "$RUNNER_TEMP/out" \
+            node/scripts/oci-artifact.sh > "$RUNNER_TEMP/out/console.entry.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: files-console-image
+          path: ${{ runner.temp }}/out/*.oci.tar
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  tool:
+    needs: plan
+    runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/data-exchange-node
+          ref: ${{ needs.plan.outputs.node }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - name: iretail-release
+        run: |
+          cargo build --release --locked -p iretail-release
+          mkdir -p "$RUNNER_TEMP/tool"
+          cp target/release/iretail-release "$RUNNER_TEMP/tool/"
+          cp contracts/CONTRACTS_REF "$RUNNER_TEMP/tool/CONTRACTS_REF"
+          (cd "$RUNNER_TEMP/tool" && sha256sum iretail-release | tee iretail-release.sha256)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tool
+          path: ${{ runner.temp }}/tool
+          if-no-files-found: error
+          retention-days: 1
+
+  gateway:
+    needs: plan
+    runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 40
+    outputs:
+      windows_signed: ${{ steps.sign.outputs.windows }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/device-gateway
+          ref: ${{ needs.plan.outputs.gateway }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Test and build
+        run: |
+          go vet ./...
+          go test ./...
+          scripts/release-build.sh binaries "$VERSION" "$RUNNER_TEMP/work"
+      - name: Sign the Windows executables
+        id: sign
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARTIFACT_SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          ARTIFACT_SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          ARTIFACT_SIGNING_PROFILE: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+        run: |
+          scripts/sign-windows.sh "$RUNNER_TEMP/work/windows-x64/gateway.exe" "$RUNNER_TEMP/work/windows-x64/gatewayctl.exe" | tee "$RUNNER_TEMP/sign.log"
+          result="$(tail -n 1 "$RUNNER_TEMP/sign.log")"
+          case "$result" in
+            signed | unsigned) echo "windows=$result" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::sign-windows.sh ended with \"$result\""; exit 1 ;;
+          esac
+      - name: Archives
+        run: scripts/release-build.sh archives "$VERSION" "$RUNNER_TEMP/work" "$RUNNER_TEMP/out"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: files-gateway
+          path: ${{ runner.temp }}/out
+          if-no-files-found: error
+          retention-days: 1
+
+  desktop:
+    needs: plan
+    name: ${{ matrix.app }} ${{ matrix.platform }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: true
+      matrix:
+        app: [cashier, manager]
+        platform: [linux-x64, windows-x64, macos-universal]
+        include:
+          - platform: linux-x64
+            runner: ${{ vars.RUNNER || '"ubuntu-latest"' }}
+            target: linux
+          - platform: windows-x64
+            runner: ${{ vars.RUNNER_WINDOWS || '"windows-latest"' }}
+            target: windows
+          - platform: macos-universal
+            runner: ${{ vars.RUNNER_MACOS || '"macos-latest"' }}
+            target: macos
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/${{ matrix.app }}
+          ref: ${{ matrix.app == 'cashier' && needs.plan.outputs.cashier || needs.plan.outputs.manager }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          persist-credentials: false
+      - name: Linux desktop build tools
+        if: matrix.target == 'linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends clang cmake ninja-build pkg-config \
+            libgtk-3-dev liblzma-dev libsecret-1-dev
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: false
+      - name: Version, vendored packages and release keys
+        run: |
+          tool/release-version.sh "$VERSION"
+          flutter pub get --enforce-lockfile
+          if [ "${{ matrix.target }}" = linux ]; then
+            tool/vendor_checksum.sh --check
+            # A release built without the release keys could never update
+            # itself again (CASH-16): refused; a pre-release only warns.
+            if ! dart run tool/check_release_keys.dart; then
+              case "$VERSION" in
+                *-*) echo "::warning::the vendored core embeds no usable release keys: this pre-release can never update itself" ;;
+                *) echo "::error::the vendored core embeds no usable release keys"; exit 1 ;;
+              esac
+            fi
+          fi
+      - name: Build
+        env:
+          APP: ${{ matrix.app }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          defines=()
+          [ "$APP" = cashier ] && defines=(--dart-define=CASHIER_VERSION="$VERSION")
+          # Flutter makes build/native_assets/<os> only for an app whose
+          # packages ship native assets; the CMake install rule needs it.
+          [ "$TARGET" = macos ] || mkdir -p "build/native_assets/$TARGET"
+          flutter build "$TARGET" --release "${defines[@]}"
+      - name: Sign (Windows)
+        if: matrix.target == 'windows'
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARTIFACT_SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          ARTIFACT_SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          ARTIFACT_SIGNING_PROFILE: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+        run: |
+          release=build/windows/x64/runner/Release
+          tool/sign-windows.sh "$release"/*.exe "$release"/*.dll | tee "$RUNNER_TEMP/sign.log"
+          tail -n 1 "$RUNNER_TEMP/sign.log" > "$RUNNER_TEMP/signed.txt"
+      - name: Sign and notarize (macOS)
+        if: matrix.target == 'macos'
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          app="$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' -type d | head -n 1)"
+          tool/sign-macos.sh "$app" macos/Runner/Release.entitlements | tee "$RUNNER_TEMP/sign.log"
+          tail -n 1 "$RUNNER_TEMP/sign.log" > "$RUNNER_TEMP/signed.txt"
+      - name: Archive
+        env:
+          APP: ${{ matrix.app }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          file="$(tool/release-archive.sh "$APP" "$VERSION" "$PLATFORM" "$RUNNER_TEMP/out")"
+          echo "built ${file##*/}"
+          if [ -f "$RUNNER_TEMP/signed.txt" ]; then
+            case "$(cat "$RUNNER_TEMP/signed.txt")" in
+              signed | unsigned) ;;
+              *) echo "::error::the signer ended with \"$(cat "$RUNNER_TEMP/signed.txt")\""; exit 1 ;;
+            esac
+            mkdir -p "$RUNNER_TEMP/notes"
+            cp "$RUNNER_TEMP/signed.txt" "$RUNNER_TEMP/notes/$APP-$PLATFORM.signed"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: files-${{ matrix.app }}-${{ matrix.platform }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: matrix.target != 'linux'
+        with:
+          name: signed-${{ matrix.app }}-${{ matrix.platform }}
+          path: ${{ runner.temp }}/notes
+          if-no-files-found: error
+          retention-days: 1
+
+  kit:
+    needs: plan
+    runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/deploy
+          ref: ${{ needs.plan.outputs.deploy }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          persist-credentials: false
+      - name: The deployment kit
+        env:
+          COMMIT: ${{ needs.plan.outputs.deploy }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/out" "$RUNNER_TEMP/fragment"
+          scripts/build-kit.sh "$VERSION" "$RUNNER_TEMP/out" "$RUNNER_TEMP/fragment/deploy.fragment.json" "$COMMIT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: files-kit
+          path: ${{ runner.temp }}/out
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kit-fragment
+          path: ${{ runner.temp }}/fragment
+          if-no-files-found: error
+          retention-days: 1
+
+  android:
+    needs: plan
+    name: android ${{ matrix.app }}
+    runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - app: cashier
+            file: cashier
+          - app: manager
+            file: manager
+          # The customer app is white label; built without a brand it is
+          # the example chain, Corner Market (its BrandDefaults).
+          - app: customer-app
+            file: customer
+    steps:
+      - name: Signing secrets
+        id: secrets
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          APP: ${{ matrix.app }}
+        run: |
+          set=0
+          for v in KEYSTORE STORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do [ -n "${!v}" ] && set=$((set + 1)); done
+          case "$set" in
+            4) echo "build=true" >> "$GITHUB_OUTPUT" ;;
+            0) echo "build=false" >> "$GITHUB_OUTPUT"
+               echo "- Android ($APP): **not built**: the ANDROID_* signing secrets are not set (README, \"Secrets\")." >> "$GITHUB_STEP_SUMMARY" ;;
+            *) echo "::error::some ANDROID_* secrets are set and some are not"; exit 1 ;;
+          esac
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        if: steps.secrets.outputs.build == 'true'
+        with:
+          repository: iretail-pro/${{ matrix.app }}
+          ref: ${{ matrix.app == 'cashier' && needs.plan.outputs.cashier || matrix.app == 'manager' && needs.plan.outputs.manager || needs.plan.outputs.customer }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        if: steps.secrets.outputs.build == 'true'
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: false
+      - name: The signing key's settings
+        if: steps.secrets.outputs.build == 'true'
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          [ -x tool/key-properties.sh ] || { echo "::error::this commit has no tool/key-properties.sh to sign the APK with"; exit 1; }
+          printf '%s' "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.jks"
+          STORE_FILE="$RUNNER_TEMP/release.jks" tool/key-properties.sh android/key.properties
+      - name: Build the APK
+        if: steps.secrets.outputs.build == 'true'
+        env:
+          APP: ${{ matrix.app }}
+          FILE: ${{ matrix.file }}
+        run: |
+          defines=()
+          [ "$APP" = cashier ] && defines=(--dart-define=CASHIER_VERSION="$VERSION")
+          flutter pub get --enforce-lockfile
+          flutter build apk --release "${defines[@]}"
+          mkdir -p "$RUNNER_TEMP/out"
+          cp build/app/outputs/flutter-apk/app-release.apk "$RUNNER_TEMP/out/$FILE-$VERSION-android.apk"
+          rm -f android/key.properties "$RUNNER_TEMP/release.jks"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.secrets.outputs.build == 'true'
+        with:
+          name: mobile-android-${{ matrix.file }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: error
+          retention-days: 1
+
+  ios:
+    needs: plan
+    name: ios ${{ matrix.app }}
+    runs-on: ${{ fromJSON(vars.RUNNER_MACOS || '"macos-latest"') }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: cashier
+            file: cashier
+            bundle: pro.iretail.iretailCashier
+            profile: IOS_PROFILE_CASHIER
+          - app: manager
+            file: manager
+            bundle: pro.iretail.iretailManager
+            profile: IOS_PROFILE_MANAGER
+          - app: customer-app
+            file: customer
+            bundle: pro.iretail.customer
+            profile: IOS_PROFILE_CUSTOMER
+    steps:
+      - name: Signing secrets
+        id: secrets
+        env:
+          P12: ${{ secrets.IOS_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          TEAM: ${{ secrets.IOS_TEAM_ID }}
+          PROFILE: ${{ secrets[matrix.profile] }}
+          APP: ${{ matrix.app }}
+          PROFILE_NAME: ${{ matrix.profile }}
+        run: |
+          set=0
+          for v in P12 P12_PASSWORD TEAM; do [ -n "${!v}" ] && set=$((set + 1)); done
+          case "$set" in
+            3) ;;
+            0) echo "build=false" >> "$GITHUB_OUTPUT"
+               echo "- iOS ($APP): **not built**: the IOS_* signing secrets are not set (README, \"Secrets\")." >> "$GITHUB_STEP_SUMMARY"
+               exit 0 ;;
+            *) echo "::error::some of IOS_CERTIFICATE_P12, IOS_CERTIFICATE_PASSWORD and IOS_TEAM_ID are set and some are not"; exit 1 ;;
+          esac
+          if [ -z "$PROFILE" ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "- iOS ($APP): **not built**: $PROFILE_NAME is not set." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        if: steps.secrets.outputs.build == 'true'
+        with:
+          persist-credentials: false
+          path: software
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        if: steps.secrets.outputs.build == 'true'
+        with:
+          repository: iretail-pro/${{ matrix.app }}
+          ref: ${{ matrix.app == 'cashier' && needs.plan.outputs.cashier || matrix.app == 'manager' && needs.plan.outputs.manager || needs.plan.outputs.customer }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          path: src
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        if: steps.secrets.outputs.build == 'true'
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: false
+      - name: Build, sign for App Store Connect, export
+        if: steps.secrets.outputs.build == 'true'
+        env:
+          P12: ${{ secrets.IOS_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          PROFILE: ${{ secrets[matrix.profile] }}
+          TEAM: ${{ secrets.IOS_TEAM_ID }}
+          APP: ${{ matrix.app }}
+          FILE: ${{ matrix.file }}
+          BUNDLE: ${{ matrix.bundle }}
+          # Grows with every run, and with a re-run of the same run.
+          BUILD_NUMBER: ${{ github.run_number }}${{ github.run_attempt }}
+        run: software/scripts/ios-appstore.sh "$APP" "$FILE" src "$VERSION" "$BUILD_NUMBER" "$BUNDLE" "$RUNNER_TEMP/out"
+      # Not a release file: the testflight job uploads it once the release
+      # is published (named outside the mobile-* pattern on purpose).
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.secrets.outputs.build == 'true'
+        with:
+          name: testflight-${{ matrix.file }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: error
+          retention-days: 1
+
+  assemble:
+    needs: [plan, node-image, updater-image, console-image, tool, gateway, desktop, kit]
+    runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 30
+    outputs:
+      unsigned_sha256: ${{ steps.assemble.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/manager
+          ref: ${{ needs.plan.outputs.manager }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          path: manager
+          persist-credentials: false
+          sparse-checkout: tool/release-fragment.py
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: files-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/release/files
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: kit-fragment
+          path: ${{ runner.temp }}/release/fragments
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: tool
+          path: ${{ runner.temp }}/release/tool
+      - name: Assemble the unsigned manifest
+        id: assemble
+        # No secret in this step's environment.
+        run: |
+          work="$RUNNER_TEMP/release"
+          chmod +x "$work/tool/iretail-release"
+          (cd "$work/tool" && sha256sum --strict -c iretail-release.sha256)
+          ls -l "$work/files"
+          # Every file but the kit, whose entry deploy's build-kit.sh wrote.
+          mapfile -t files < <(find "$work/files" -maxdepth 1 -type f ! -name 'iretail-deploy-*' | sort)
+          python3 manager/tool/release-fragment.py --version "$VERSION" --registry "$REGISTRY" \
+            --out "$work/fragments/apps.fragment.json" "${files[@]}"
+          mkdir -p "$work/out"
+          "$work/tool/iretail-release" assemble \
+            --version "$VERSION" \
+            --min-node-version "$VERSION" \
+            --contracts-commit "$(cat "$work/tool/CONTRACTS_REF")" \
+            --published-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --artifacts "$work/files" \
+            --out "$work/out/manifest.unsigned.json" \
+            "$work"/fragments/*.fragment.json ||
+            { echo "::error::iretail-release refused to assemble the manifest (above)"; exit 1; }
+          jq -e --arg v "$VERSION" '.manifest.version == $v and .signatures == []' "$work/out/manifest.unsigned.json" >/dev/null
+          echo "sha256=$(sha256sum "$work/out/manifest.unsigned.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Artifacts of $VERSION"
+            echo
+            echo '| File | Size | SHA-256 |'
+            echo '|---|---:|---|'
+            jq -r '.manifest.artifacts[] | "| `\(.name)` | \(.size) | `\(.sha256)` |"' "$work/out/manifest.unsigned.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: manifest-unsigned
+          path: ${{ runner.temp }}/release/out/manifest.unsigned.json
+          if-no-files-found: error
+          retention-days: 1
+
+  sign:
+    needs: [plan, assemble]
+    runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
+    environment: release
+    timeout-minutes: 10
+    steps:
+      # Nothing but the signing script: the job that holds the release key
+      # runs it, jq and openssl, and nothing else.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/deploy
+          ref: ${{ needs.plan.outputs.deploy }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          persist-credentials: false
+          sparse-checkout: scripts/sign-manifest.sh
+          sparse-checkout-cone-mode: false
+      - name: Only the signing script
+        run: |
+          files="$(find . -path ./.git -prune -o -type f -print)"
+          [ "$files" = ./scripts/sign-manifest.sh ] ||
+            { echo "::error::the sign job checked out more than scripts/sign-manifest.sh: $files"; exit 1; }
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: manifest-unsigned
+          path: ${{ runner.temp }}/release
+      - name: Sign
+        env:
+          # The seed reaches the script in its environment only.
+          IRETAIL_RELEASE_KEY: ${{ secrets.IRETAIL_RELEASE_KEY }}
+          KEY_ID: ${{ vars.IRETAIL_RELEASE_KEY_ID }}
+          PUBLIC_KEYS: ${{ vars.IRETAIL_RELEASE_PUBLIC_KEYS }}
+          UNSIGNED_SHA256: ${{ needs.assemble.outputs.unsigned_sha256 }}
+        run: |
+          work="$RUNNER_TEMP/release"
+          mkdir -p "$work/out"
+          [ "$(sha256sum "$work/manifest.unsigned.json" | cut -d' ' -f1)" = "$UNSIGNED_SHA256" ] ||
+            { echo "::error::the unsigned manifest is not the one the assemble job made"; exit 1; }
+          [ -n "$IRETAIL_RELEASE_KEY" ] || { echo "::error::the secret IRETAIL_RELEASE_KEY is not set in the environment release"; exit 1; }
+          pub="$(jq -r --arg k "$KEY_ID" '.[] | select(.key_id == $k) | .public_key' <<<"$PUBLIC_KEYS")"
+          scripts/sign-manifest.sh "$work/manifest.unsigned.json" "$work/out/manifest.json" "$KEY_ID" IRETAIL_RELEASE_KEY "$pub"
+          jq -r '"signed by: " + ([.signatures[].key_id] | join(", "))' "$work/out/manifest.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: manifest-signed
+          path: ${{ runner.temp }}/release/out/manifest.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [plan, assemble, sign, android, ios]
+    # android and ios may skip their builds; they still end in success.
+    runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Work folder
+        run: echo "WORK=$RUNNER_TEMP/release" >> "$GITHUB_ENV"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          path: software
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/deploy
+          ref: ${{ needs.plan.outputs.deploy }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          path: deploy
+          persist-credentials: false
+          sparse-checkout: scripts/verify-manifest.sh
+          sparse-checkout-cone-mode: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/docs
+          ref: ${{ needs.plan.outputs.docs }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          path: docs
+          persist-credentials: false
+          sparse-checkout: docs/releases
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: files-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/release/files
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: mobile-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/release/mobile
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: signed-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/release/signed
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: tool
+          path: ${{ runner.temp }}/release/tool
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: manifest-signed
+          path: ${{ runner.temp }}/release
+      - name: Verify
+        # No secret in this step's environment.
+        env:
+          PUBLIC_KEYS: ${{ vars.IRETAIL_RELEASE_PUBLIC_KEYS }}
+        run: |
+          tool="$WORK/tool/iretail-release"
+          chmod +x "$tool"
+          (cd "$WORK/tool" && sha256sum --strict -c iretail-release.sha256)
+          jq -r '.[] | "\(.key_id)=\(.public_key)"' <<<"$PUBLIC_KEYS" > "$WORK/release-keys.txt"
+          for kid in $(jq -r '.signatures[].key_id' "$WORK/manifest.json"); do
+            pair="$(grep -m1 "^$kid=" "$WORK/release-keys.txt")" || { echo "::error::$kid is not in IRETAIL_RELEASE_PUBLIC_KEYS"; exit 1; }
+            [ "$(deploy/scripts/verify-manifest.sh "$WORK/manifest.json" "$pair")" = "$kid" ] ||
+              { echo "::error::openssl does not verify $kid's signature"; exit 1; }
+            "$tool" verify --manifest "$WORK/manifest.json" --public-key "$pair" --artifacts "$WORK/files" ||
+              { echo "::error::iretail-release refused the manifest with $kid's public key (above)"; exit 1; }
+          done
+          jq -e --arg v "$VERSION" '.manifest.version == $v' "$WORK/manifest.json" >/dev/null
+          extra="$(comm -23 <(find "$WORK/files" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort) \
+            <(jq -r '.manifest.artifacts[].name' "$WORK/manifest.json" | sort))"
+          [ -z "$extra" ] || { echo "::error::files the manifest does not name: $extra"; exit 1; }
+      - name: version.json, notes, the bundle and SHA256SUMS
+        env:
+          NOTES: ${{ inputs.notes }}
+        run: |
+          tool="$WORK/tool/iretail-release"
+          "$tool" version-json --manifest "$WORK/manifest.json" --keys "$WORK/release-keys.txt" --out "$WORK/version.json"
+          "$tool" bundle --manifest "$WORK/manifest.json" --keys "$WORK/release-keys.txt" \
+            --artifacts "$WORK/files" --out "$WORK/iretail-$VERSION.tar"
+          tar -tf "$WORK/iretail-$VERSION.tar" | sed -n 1p | grep -qx manifest.json ||
+            { echo "::error::the bundle's first member is not manifest.json"; exit 1; }
+          software/scripts/release-notes.sh "$VERSION" docs/docs/releases "$WORK/signed" "$WORK/mobile" "$NOTES" "$WORK/notes"
+          (
+            cd "$WORK"
+            : > SHA256SUMS
+            (cd files && sha256sum -- *) >> SHA256SUMS
+            if compgen -G 'mobile/*' >/dev/null; then (cd mobile && sha256sum -- *) >> SHA256SUMS; fi
+            sha256sum manifest.json version.json "iretail-$VERSION.tar" >> SHA256SUMS
+          )
+          cat "$WORK/SHA256SUMS"
+      - name: Push the images by digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          jq -r '.manifest.artifacts[] | select(.kind == "image") | "\(.name) \(.image) \(.digest)"' "$WORK/manifest.json" |
+            while read -r name image digest; do
+              software/scripts/push-image.sh "$WORK/files/$name" "$image" "$VERSION" "$digest"
+              echo "- \`$image:$VERSION\` = \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
+            done
+      - name: The GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+        run: |
+          args=(--repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "iRetail PRO $VERSION" --notes-file "$WORK/notes/release.md")
+          [ "$PRERELEASE" = true ] && args+=(--prerelease) || args+=(--latest)
+          assets=("$WORK"/files/* "$WORK/manifest.json" "$WORK/version.json" "$WORK/SHA256SUMS" "$WORK/iretail-$VERSION.tar")
+          if compgen -G "$WORK/mobile/*" >/dev/null; then assets+=("$WORK"/mobile/*); fi
+          for lang in en ru; do
+            [ -f "$WORK/notes/$lang.md" ] && cp "$WORK/notes/$lang.md" "$WORK/notes-$lang.md" && assets+=("$WORK/notes-$lang.md")
+          done
+          gh release create "v$VERSION" "${args[@]}" "${assets[@]}"
+          echo "Released [v$VERSION]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/v$VERSION)" >> "$GITHUB_STEP_SUMMARY"
+
+  testflight:
+    # The iPhone builds go to TestFlight, never into the GitHub Release: an
+    # App Store build installs on no device by itself. After publish, so
+    # nothing leaves this run before the manifest is signed.
+    needs: [publish, ios]
+    runs-on: ${{ fromJSON(vars.RUNNER_MACOS || '"macos-latest"') }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: testflight-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/ipa
+      - name: Upload to App Store Connect
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          mapfile -t ipas < <(find "$RUNNER_TEMP/ipa" -maxdepth 1 -name '*.ipa' 2>/dev/null | sort)
+          if [ "${#ipas[@]}" = 0 ]; then
+            echo "- iOS: nothing to upload (no app was built)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          for v in APPLE_API_KEY_P8 APPLE_API_KEY_ID APPLE_API_ISSUER_ID; do
+            [ -n "${!v}" ] || { echo "::error::$v is not set: TestFlight needs the App Store Connect API key"; exit 1; }
+          done
+          # altool reads the key from this folder by its id; removed at the end.
+          keys="$HOME/.appstoreconnect/private_keys"
+          mkdir -p "$keys"
+          trap 'rm -rf "$keys"' EXIT
+          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$keys/AuthKey_$APPLE_API_KEY_ID.p8"
+          for ipa in "${ipas[@]}"; do
+            xcrun altool --upload-app --type ios --file "$ipa" \
+              --apiKey "$APPLE_API_KEY_ID" --apiIssuer "$APPLE_API_ISSUER_ID"
+            echo "- iOS: \`${ipa##*/}\` uploaded to App Store Connect; it reaches TestFlight once Apple has processed it." >> "$GITHUB_STEP_SUMMARY"
+          done

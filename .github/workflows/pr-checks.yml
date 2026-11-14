@@ -1,0 +1,37 @@
+# Checks the workflows and scripts on every pull request. It checks out no
+# source repository and holds no secret: this repository is public.
+name: pr-checks
+on:
+  pull_request:
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  lint:
+    runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+      - name: actionlint
+        run: |
+          # actionlint 1.7.7, its release archive checked by SHA-256.
+          url=https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz
+          curl -fsSL "$url" -o "$RUNNER_TEMP/actionlint.tar.gz"
+          echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+      - name: release notes script
+        run: |
+          t="$(mktemp -d)"
+          mkdir -p "$t/signed" "$t/mobile" "$t/docs"
+          echo unsigned > "$t/signed/cashier-windows-x64.signed"
+          echo signed > "$t/signed/cashier-macos-universal.signed"
+          scripts/release-notes.sh 9.9.9 "$t/docs" "$t/signed" "$t/mobile" "Test notes" "$t/out"
+          grep -q "Windows installers of this release are not code-signed" "$t/out/en.md"
+          grep -q '^## Files' "$t/out/release.md"
