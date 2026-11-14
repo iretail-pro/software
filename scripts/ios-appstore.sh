@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Builds the register (cashier) for iPhone and iPad without a brand, signs it
-# for App Store Connect and exports cashier-<version>-ios.ipa, on a macOS
-# runner. The release's testflight job uploads it once the release is
+# Builds an app (the register, the back office or the customer app) for
+# iPhone and iPad, signs it for App Store Connect and exports
+# <file>-<version>-ios.ipa, on a macOS runner. The release's testflight job uploads it once the release is
 # published; an App Store build installs on no device by itself.
 #
-#   scripts/ios-appstore.sh <cashier checkout> <version> <build number> <out dir>
+#   scripts/ios-appstore.sh <app> <file> <checkout> <version> <build number> <bundle id> <out dir>
 #
 # The App Store's version is MAJOR.MINOR.PATCH, so a pre-release's suffix is
 # left out of it; the build number must grow with every upload.
@@ -12,16 +12,18 @@
 # From the environment (secrets of the release workflow):
 #   P12           the Apple Distribution certificate and key, a .p12 as base64
 #   P12_PASSWORD  its password
-#   PROFILE       the App Store provisioning profile for the register's bundle
-#                 id (pro.iretail.iretailCashier), as base64
+#   PROFILE       the App Store provisioning profile for <bundle id>, as base64
 #   TEAM          the Apple Developer team id
 # The certificate goes into a throwaway keychain and the profile into the
 # user's profiles folder, both removed when the script ends.
 set -euo pipefail
-src="${1:?usage: ios-appstore.sh <cashier checkout> <version> <build number> <out dir>}"
-version="${2:?version}"
-build="${3:?build number}"
-out="${4:?out dir}"
+app="${1:?usage: ios-appstore.sh <app> <file> <checkout> <version> <build number> <bundle id> <out dir>}"
+file="${2:?file}"
+src="${3:?checkout}"
+version="${4:?version}"
+build="${5:?build number}"
+bundle_id="${6:?bundle id}"
+out="${7:?out dir}"
 grep -Eq '^[1-9][0-9]*$' <<<"$build" || { echo "ios-appstore: the build number $build is not a whole number" >&2; exit 2; }
 marketing="${version%%-*}"
 : "${P12:?}" "${P12_PASSWORD:?}" "${PROFILE:?}" "${TEAM:?}"
@@ -53,7 +55,6 @@ uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$work/profile.plist")"
 name="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$work/profile.plist")"
 mkdir -p "$profiles"
 cp "$work/profile.mobileprovision" "$profiles/$uuid.mobileprovision"
-bundle_id="$(sed -n 's/^BRAND_BUNDLE_ID = //p' "$src/ios/Flutter/BrandDefaults.xcconfig")"
 
 cat > "$work/ExportOptions.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -73,8 +74,9 @@ PLIST
 
 cd "$src"
 flutter pub get --enforce-lockfile
-flutter build ios --release --no-codesign --build-name="$marketing" --build-number="$build" \
-  --dart-define=CASHIER_VERSION="$version"
+defines=()
+[ "$app" = cashier ] && defines=(--dart-define=CASHIER_VERSION="$version")
+flutter build ios --release --no-codesign --build-name="$marketing" --build-number="$build" "${defines[@]}"
 xcodebuild -workspace ios/Runner.xcworkspace -scheme Runner -configuration Release \
   -archivePath "$work/Runner.xcarchive" -destination 'generic/platform=iOS' archive \
   CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="$TEAM" CODE_SIGN_IDENTITY="Apple Distribution" \
@@ -84,5 +86,5 @@ xcodebuild -exportArchive -archivePath "$work/Runner.xcarchive" \
 mkdir -p "$out"
 ipa="$(find "$work/export" -maxdepth 1 -name '*.ipa' | head -n 1)"
 [ -n "$ipa" ] || { echo "ios-appstore: no .ipa was exported" >&2; exit 1; }
-cp "$ipa" "$out/cashier-$version-ios.ipa"
-echo "exported cashier-$version-ios.ipa"
+cp "$ipa" "$out/$file-$version-ios.ipa"
+echo "exported $file-$version-ios.ipa"
