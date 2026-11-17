@@ -92,9 +92,51 @@ release's manifest and moves only the tag. The first release creates them; then,
 package's visibility to **Public** (its Package settings). The manifest
 names these repositories, so a store's updater pulls them from here.
 
+## The demo
+
+Every pilot store of deploy's `demo/pilots` in one container, to try the
+software on one computer with one command (Docker Desktop on macOS or
+Windows, Docker on Linux; Intel and ARM):
+
+```bash
+docker run --rm -p 127.0.0.1:8080-8088:8080-8088 -p 127.0.0.1:50051:50051 ghcr.io/iretail-pro/software/demo
+```
+
+Then open <http://localhost:8080>: it lists the seven stores (supermarket,
+pharmacy, grocery, coffee shop, pizzeria with its tables and guest menu,
+apparel with variants, electronics with serial numbers), each on its own
+port from 8081 to 8087 with the back office at `/` and the register at
+`/register/` in the browser, its server address and device tokens for the
+desktop apps of the release, and the sign-in (login `admin`, PIN
+`246810`, or `-e DEMO_PIN=…`). `-e DEMO_STORES=pizzeria,grocery` starts only
+those. The register in the browser has no device gateway, so it sells for
+cash only; the desktop register pairs with the gateway on
+`localhost:50051` (token `iretail-demo`), which drives emulated printers,
+a scale, a scanner and card terminals, shown on the start page's devices
+panel. The pizzeria's guest menu answers on 8088. Every store runs as
+Starter (no license key): one register each, and the pizzeria seats its
+first three tables. Nothing is kept: the stores are made again from the
+pilots each time it starts. Keep the ports on `127.0.0.1` as above: the
+start page shows the demo's tokens.
+
+Inside: PostgreSQL 17 and Redis 7, one store node per pilot (its own
+database and Redis database), the gateway and its emulators, and nginx
+serving each store's browser apps with its API on the same origin
+(`demo/`). **demo**, run by hand with a published version, builds it: the
+node and the back office's browser build come from the release's own
+images, pulled by the digests its signed manifest names (linux/amd64); the
+node for linux/arm64 is built from data-exchange-node at `v<version>` with
+the same Dockerfile and license key; the register's browser build, the
+gateway and the pilots come from their repositories at `v<version>`
+(`scripts/demo-context.sh`). It starts the image and checks every store
+before it pushes `demo:<version>` and `demo:latest`
+(`scripts/demo-test.sh`); set the package `software/demo` **Public** once,
+as the others.
+
 ## Runners
 
-The jobs run on the variables `RUNNER`, `RUNNER_WINDOWS`, `RUNNER_MACOS` (a
+The jobs run on the variables `RUNNER`, `RUNNER_WINDOWS`, `RUNNER_MACOS` and
+`RUNNER_ARM` (the demo's linux/arm64 node, `ubuntu-24.04-arm` when unset; a
 `runs-on` value as JSON), GitHub's hosted runners when unset; for a public
 repository those cost no minutes, macOS included. Set this repository's own
 variable `RUNNER` to `"ubuntu-latest"`: the organization's self-hosted
