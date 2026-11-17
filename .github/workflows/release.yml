@@ -111,6 +111,7 @@ jobs:
       gateway: ${{ steps.commits.outputs.device-gateway }}
       deploy: ${{ steps.commits.outputs.deploy }}
       docs: ${{ steps.commits.outputs.docs }}
+      sources: ${{ steps.sources.outputs.list }}
       prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - name: From main only
@@ -169,7 +170,9 @@ jobs:
           token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
           path: src/data-exchange-node
           persist-credentials: false
-          sparse-checkout: Cargo.toml
+          sparse-checkout: |
+            Cargo.toml
+            contracts/CONTRACTS_REF
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: iretail-pro/cashier
@@ -177,7 +180,9 @@ jobs:
           token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
           path: src/cashier
           persist-credentials: false
-          sparse-checkout: pubspec.yaml
+          sparse-checkout: |
+            pubspec.yaml
+            vendor/VENDOR.json
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: iretail-pro/manager
@@ -185,7 +190,9 @@ jobs:
           token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
           path: src/manager
           persist-credentials: false
-          sparse-checkout: pubspec.yaml
+          sparse-checkout: |
+            pubspec.yaml
+            vendor/VENDOR.json
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: iretail-pro/customer-app
@@ -193,7 +200,9 @@ jobs:
           token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
           path: src/customer-app
           persist-credentials: false
-          sparse-checkout: pubspec.yaml
+          sparse-checkout: |
+            pubspec.yaml
+            vendor/VENDOR.json
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: iretail-pro/device-gateway
@@ -215,6 +224,39 @@ jobs:
             [ "${pair#*=}" = "$VERSION" ] || { echo "::error::${pair%%=*} is at ${pair#*=}, not $VERSION"; bad=1; }
           done
           exit "$bad"
+      - name: The sources to tag
+        # Each repository a release is built from, at its commit: the seven
+        # above, contracts as the node copies it, core and design as the
+        # apps vendor them. Published as sources.txt; tagged v<version>
+        # once the release is out (scripts/tag-sources.sh).
+        id: sources
+        env:
+          NODE: ${{ steps.commits.outputs.data-exchange-node }}
+          CASHIER: ${{ steps.commits.outputs.cashier }}
+          MANAGER: ${{ steps.commits.outputs.manager }}
+          CUSTOMER: ${{ steps.commits.outputs.customer-app }}
+          GATEWAY: ${{ steps.commits.outputs.device-gateway }}
+          DEPLOY: ${{ steps.commits.outputs.deploy }}
+          DOCS: ${{ steps.commits.outputs.docs }}
+        run: |
+          contracts="$(tr -d '[:space:]' < src/data-exchange-node/contracts/CONTRACTS_REF)"
+          vendored() { jq -r --arg p "$1" '.[$p].commit' "src/$2/vendor/VENDOR.json"; }
+          for package in iretail_core iretail_design; do
+            for app in manager customer-app; do
+              [ "$(vendored "$package" "$app")" = "$(vendored "$package" cashier)" ] ||
+                { echo "::error::$app vendors another $package than cashier: no single commit to tag"; exit 1; }
+            done
+          done
+          list="$(printf '%s\n' \
+            "contracts $contracts" \
+            "core $(vendored iretail_core cashier)" \
+            "design $(vendored iretail_design cashier)" \
+            "data-exchange-node $NODE" "device-gateway $GATEWAY" \
+            "cashier $CASHIER" "manager $MANAGER" "customer-app $CUSTOMER" \
+            "deploy $DEPLOY" "docs $DOCS")"
+          grep -Evq '^[a-z0-9-]+ [0-9a-f]{40}$' <<<"$list" && { echo "::error::a source has no commit:"; echo "$list"; exit 1; }
+          { echo 'list<<EOF'; echo "$list"; echo EOF; } >> "$GITHUB_OUTPUT"
+          { echo '### Tagged once published'; echo; echo '```'; echo "$list"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   node-image:
     needs: plan
@@ -994,6 +1036,7 @@ jobs:
       - name: version.json, notes, the bundle and SHA256SUMS
         env:
           NOTES: ${{ inputs.notes }}
+          SOURCES: ${{ needs.plan.outputs.sources }}
         run: |
           tool="$WORK/tool/iretail-release"
           "$tool" version-json --manifest "$WORK/manifest.json" --keys "$WORK/release-keys.txt" --out "$WORK/version.json"
@@ -1008,7 +1051,8 @@ jobs:
             (cd files && sha256sum -- *) >> SHA256SUMS
             if compgen -G 'mobile/*' >/dev/null; then (cd mobile && sha256sum -- *) >> SHA256SUMS; fi
             (cd guides && sha256sum -- *) >> SHA256SUMS
-            sha256sum manifest.json version.json "iretail-$VERSION.tar" >> SHA256SUMS
+            printf '%s\n' "$SOURCES" > sources.txt
+            sha256sum manifest.json version.json "iretail-$VERSION.tar" sources.txt >> SHA256SUMS
             # The notes go out as notes-<lang>.md, under that name here too.
             for lang in en ru; do
               if [ -f "notes/$lang.md" ]; then
@@ -1025,7 +1069,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           args=(--repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "iRetail PRO $VERSION" --notes-file "$WORK/notes/release.md" --draft)
-          assets=("$WORK"/files/* "$WORK/manifest.json" "$WORK/version.json" "$WORK/SHA256SUMS" "$WORK/iretail-$VERSION.tar")
+          assets=("$WORK"/files/* "$WORK/manifest.json" "$WORK/version.json" "$WORK/SHA256SUMS" "$WORK/iretail-$VERSION.tar" "$WORK/sources.txt")
           if compgen -G "$WORK/mobile/*" >/dev/null; then assets+=("$WORK"/mobile/*); fi
           assets+=("$WORK"/guides/*.pdf)
           for lang in en ru; do
@@ -1066,6 +1110,14 @@ jobs:
               software/scripts/tag-latest.sh "$image" "$VERSION" "$digest"
               echo "- \`$image:latest\` = \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
             done
+      - name: Tag the sources
+        # Every source repository gets v<version> on the commit this run
+        # built (sources.txt), prereleases too, once the release is out.
+        # The token needs Contents: write on them (README, "Secrets").
+        env:
+          GH_TOKEN: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+        run: |
+          software/scripts/tag-sources.sh "$VERSION" "$WORK/sources.txt" | tee -a "$GITHUB_STEP_SUMMARY"
 
   testflight:
     # The iPhone builds go to TestFlight, never into the GitHub Release: an

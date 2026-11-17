@@ -1,0 +1,53 @@
+# Tags the source repositories of a release already published here, by
+# hand only. release.yml does this itself when it publishes; this is for a
+# release published before it did (1.0.0), or a tag step that failed (the
+# token without write access, say). The list is the release's sources.txt;
+# a release without one takes it as the input `sources`, one
+# "<repository> <commit>" a line. README, "Releasing".
+name: tag-sources
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: A published release, such as 1.0.0
+        required: true
+        type: string
+      sources:
+        description: Only for a release without sources.txt, one "<repository> <commit>" a line
+        required: false
+        type: string
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  tag:
+    runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: The release's sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SOURCES: ${{ inputs.sources }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9a-z.-]+)?$ ]] || { echo "::error::$VERSION is not a version"; exit 1; }
+          draft="$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft)"
+          [ "$draft" = false ] || { echo "::error::v$VERSION is not published"; exit 1; }
+          if gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" --pattern sources.txt --dir "$RUNNER_TEMP" 2>/dev/null; then
+            [ -z "$SOURCES" ] || { echo "::error::v$VERSION has its sources.txt: the input sources is not taken"; exit 1; }
+          else
+            [ -n "$SOURCES" ] || { echo "::error::v$VERSION has no sources.txt: give the input sources"; exit 1; }
+            printf '%s\n' "$SOURCES" > "$RUNNER_TEMP/sources.txt"
+          fi
+          cat "$RUNNER_TEMP/sources.txt"
+      - name: Tag the sources
+        env:
+          GH_TOKEN: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          scripts/tag-sources.sh "$VERSION" "$RUNNER_TEMP/sources.txt" | tee -a "$GITHUB_STEP_SUMMARY"

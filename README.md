@@ -46,6 +46,16 @@ is here: nothing is uploaded to the site, which reads a release from this
 repository's GitHub release itself (site's README, "Releases and guides in
 R2"). Nothing is pushed or published before the manifest is signed.
 
+The run names the commits it builds from in `sources.txt`, a release asset
+(one `<repository> <commit>` a line: the seven checked out, contracts as
+the node copies it, core and design as the apps vendor them), and once the
+release is published it tags each of them `v<version>`
+(`scripts/tag-sources.sh`): a commit `main` does not hold is refused, a
+tag already on that commit is left, a tag on another commit is never
+moved. For a release published before this step existed (1.0.0), or when
+the step failed, run **tag-sources** by hand with the version, and for a
+release without `sources.txt` the list as the input `sources`.
+
 ## Secrets
 
 Repository secrets unless noted. Each signing set is all or nothing: with
@@ -54,7 +64,7 @@ and says so; with part of it the run fails.
 
 | Name | For |
 |---|---|
-| `IRETAIL_SOURCES_TOKEN` | a fine-grained token with Contents: read on the organization's repositories (data-exchange-node, cashier, manager, customer-app, device-gateway, deploy, docs) |
+| `IRETAIL_SOURCES_TOKEN` | a fine-grained token with Contents: **read and write** on the organization's repositories data-exchange-node, cashier, manager, customer-app, device-gateway, deploy, docs, contracts, core and design: read to build, write only to tag each one `v<version>` once the release is published |
 | `IRETAIL_RELEASE_KEY` | **in the environment `release`** (add required reviewers there): the release key's seed |
 | `MACOS_CERTIFICATE_P12`, `MACOS_CERTIFICATE_PASSWORD`, `MACOS_SIGN_IDENTITY`, `APPLE_API_KEY_P8`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID` | Developer ID signing and notarization of the macOS apps |
 | `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` | Windows signing (Artifact Signing) |
