@@ -1,0 +1,52 @@
+# Points the images' tag `latest` at a release already published here, by
+# hand only. release.yml does this itself when it publishes; this is for a
+# release published before it did (1.0.0), or to move `latest` back to an
+# earlier release. It builds and pushes nothing else: the digests come from
+# the release's signed manifest, and each must already carry its version's
+# tag on the registry. README, "Releasing".
+name: tag-latest
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: A published release, such as 1.0.0
+        required: true
+        type: string
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  tag:
+    runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: The release's manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::$VERSION is not a release version"; exit 1; }
+          draft="$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft)"
+          [ "$draft" = false ] || { echo "::error::v$VERSION is not published"; exit 1; }
+          gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" --pattern manifest.json --dir "$RUNNER_TEMP"
+          jq -e --arg v "$VERSION" '.manifest.version == $v' "$RUNNER_TEMP/manifest.json" >/dev/null
+      - name: Tag the images latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          jq -r '.manifest.artifacts[] | select(.kind == "image") | "\(.image) \(.digest)"' "$RUNNER_TEMP/manifest.json" |
+            while read -r image digest; do
+              scripts/tag-latest.sh "$image" "$VERSION" "$digest"
+              echo "- \`$image:latest\` = \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
+            done

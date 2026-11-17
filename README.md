@@ -42,8 +42,9 @@ once (shown in its summary), builds everything on GitHub's hosted runners,
 assembles the manifest with no secret in reach, signs it in the environment
 `release`, verifies it with openssl and `iretail-release`, then pushes the
 images by digest and creates the GitHub Release. Only what users download
-is here: nothing is published to the site. Nothing is pushed or published before the
-manifest is signed.
+is here: nothing is uploaded to the site, which reads a release from this
+repository's GitHub release itself (site's README, "Releases and guides in
+R2"). Nothing is pushed or published before the manifest is signed.
 
 ## Secrets
 
@@ -72,7 +73,12 @@ compiled into the node), `IRETAIL_RELEASE_KEY_ID` (`release-1`),
 The images are this repository's own packages:
 `ghcr.io/iretail-pro/software/node`, `software/updater` and
 `software/console`, tagged `<version>` and pushed by the digests the
-manifest names. The first release creates them; then, once, set each
+manifest names. Once the release is published (not a prerelease), the tag
+`latest` is set on the same digests (`scripts/tag-latest.sh`), which
+deploy's compose files read by default. For a release published before
+that step existed (1.0.0), or to point `latest` back at an earlier
+release, run **tag-latest** by hand with the version: it reads the
+release's manifest and moves only the tag. The first release creates them; then, once, set each
 package's visibility to **Public** (its Package settings). The manifest
 names these repositories, so a store's updater pulls them from here.
 

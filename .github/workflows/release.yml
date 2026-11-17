@@ -1009,6 +1009,13 @@ jobs:
             if compgen -G 'mobile/*' >/dev/null; then (cd mobile && sha256sum -- *) >> SHA256SUMS; fi
             (cd guides && sha256sum -- *) >> SHA256SUMS
             sha256sum manifest.json version.json "iretail-$VERSION.tar" >> SHA256SUMS
+            # The notes go out as notes-<lang>.md, under that name here too.
+            for lang in en ru; do
+              if [ -f "notes/$lang.md" ]; then
+                cp "notes/$lang.md" "notes-$lang.md"
+                sha256sum "notes-$lang.md" >> SHA256SUMS
+              fi
+            done
           )
           cat "$WORK/SHA256SUMS"
       - name: The GitHub Release, as a draft
@@ -1022,7 +1029,7 @@ jobs:
           if compgen -G "$WORK/mobile/*" >/dev/null; then assets+=("$WORK"/mobile/*); fi
           assets+=("$WORK"/guides/*.pdf)
           for lang in en ru; do
-            [ -f "$WORK/notes/$lang.md" ] && cp "$WORK/notes/$lang.md" "$WORK/notes-$lang.md" && assets+=("$WORK/notes-$lang.md")
+            [ -f "$WORK/notes-$lang.md" ] && assets+=("$WORK/notes-$lang.md")
           done
           # A draft left by an earlier failed run of this version goes first.
           if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>/dev/null | grep -qx true; then
@@ -1046,6 +1053,19 @@ jobs:
           if [ "$PRERELEASE" = true ]; then flags=(--prerelease); else flags=(--latest); fi
           gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false "${flags[@]}"
           echo "Released [v$VERSION]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/v$VERSION)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Tag the images latest
+        # As the GitHub Release is marked latest: deploy's compose defaults
+        # read `…:latest`. Only once the release is published, never for a
+        # prerelease.
+        if: needs.plan.outputs.prerelease != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          jq -r '.manifest.artifacts[] | select(.kind == "image") | "\(.image) \(.digest)"' "$WORK/manifest.json" |
+            while read -r image digest; do
+              software/scripts/tag-latest.sh "$image" "$VERSION" "$digest"
+              echo "- \`$image:latest\` = \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
+            done
 
   testflight:
     # The iPhone builds go to TestFlight, never into the GitHub Release: an
