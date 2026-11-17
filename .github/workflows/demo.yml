@@ -1,0 +1,175 @@
+# Builds and publishes the demo image, ghcr.io/iretail-pro/software/demo,
+# for a release already published here, by hand only (README, "The demo"):
+# every pilot store of deploy's demo/pilots in one container, the back
+# office and the register in the browser, the gateway with emulated
+# devices. Nothing in it is a secret; its PINs and tokens are made when the
+# container starts and thrown away when it stops.
+#
+#   node-arm64  the node for linux/arm64 (Apple silicon, ARM servers) from
+#               data-exchange-node at v<version>, as the release builds the
+#               linux/amd64 one (the same Dockerfile and license key)
+#   register    the register's browser build at /register/
+#   image       the context (scripts/demo-context.sh: the release's node and
+#               back office pulled by its manifest's digests), both
+#               platforms, a test of every store on linux/amd64, then the
+#               push of demo:<version> and, with `latest`, demo:latest
+name: demo
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: A published release, such as 1.0.0
+        required: true
+        type: string
+      latest:
+        description: Also tag the image demo:latest
+        type: boolean
+        default: true
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+env:
+  VERSION: ${{ inputs.version }}
+  FLUTTER_VERSION: 3.47.7
+  IMAGE: ghcr.io/iretail-pro/software/demo
+jobs:
+  node-arm64:
+    runs-on: ${{ fromJSON(vars.RUNNER_ARM || '"ubuntu-24.04-arm"') }}
+    timeout-minutes: 120
+    steps:
+      - name: The version
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::$VERSION is not a release version"; exit 1; }
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/data-exchange-node
+          ref: v${{ inputs.version }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          persist-credentials: false
+      - name: Build the node for linux/arm64
+        env:
+          KEY: ${{ vars.IRETAIL_LICENSE_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          docker buildx build --platform linux/arm64 -f Dockerfile \
+            --build-arg "IRETAIL_LICENSE_PUBLIC_KEY=$KEY" \
+            --output "type=local,dest=$RUNNER_TEMP/rootfs" .
+          mkdir -p "$RUNNER_TEMP/out"
+          cp "$RUNNER_TEMP/rootfs/usr/local/bin/node" "$RUNNER_TEMP/out/node"
+          file "$RUNNER_TEMP/out/node" | tee /dev/stderr | grep -q aarch64
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: node-arm64
+          path: ${{ runner.temp }}/out/node
+          if-no-files-found: error
+          retention-days: 1
+
+  register:
+    runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/cashier
+          ref: v${{ inputs.version }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: false
+      - name: The register's browser build
+        run: |
+          set -euo pipefail
+          flutter pub get --enforce-lockfile
+          flutter build web --release --no-web-resources-cdn --base-href /register/ \
+            --dart-define=CASHIER_VERSION="$VERSION"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: register-web
+          path: build/web
+          if-no-files-found: error
+          retention-days: 1
+
+  image:
+    needs: [node-arm64, register]
+    runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/deploy
+          ref: v${{ inputs.version }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          path: deploy
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: iretail-pro/device-gateway
+          ref: v${{ inputs.version }}
+          token: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          path: gateway
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: gateway/go.mod
+          cache: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: node-arm64
+          path: ${{ runner.temp }}/node-arm64
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: register-web
+          path: ${{ runner.temp }}/register-web
+      - name: The context
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" --pattern manifest.json --dir "$RUNNER_TEMP"
+          MANIFEST="$RUNNER_TEMP/manifest.json" DEPLOY_DIR=deploy GATEWAY_DIR=gateway \
+            REGISTER_WEB="$RUNNER_TEMP/register-web" NODE_ARM64="$RUNNER_TEMP/node-arm64/node" \
+            scripts/demo-context.sh "$VERSION" "$RUNNER_TEMP/ctx" | tee "$RUNNER_TEMP/platforms"
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - name: Build both platforms and test linux/amd64
+        run: |
+          set -euo pipefail
+          docker buildx create --name demo --driver docker-container --use >/dev/null
+          labels=(--label "org.opencontainers.image.version=$VERSION"
+            --label "org.opencontainers.image.source=https://github.com/iretail-pro/software"
+            --label "org.opencontainers.image.description=iRetail PRO demo: every pilot store in one container")
+          docker buildx build "${labels[@]}" --platform linux/amd64 --load -t demo:test "$RUNNER_TEMP/ctx"
+          scripts/demo-test.sh demo:test
+          docker buildx build "${labels[@]}" --platform "$(cat "$RUNNER_TEMP/platforms")" \
+            --output "type=oci,dest=$RUNNER_TEMP/demo.oci.tar" "$RUNNER_TEMP/ctx"
+      - name: Push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LATEST: ${{ inputs.latest }}
+        run: |
+          set -euo pipefail
+          skopeo login ghcr.io -u "$GITHUB_ACTOR" --password-stdin <<<"$GH_TOKEN" >/dev/null
+          skopeo copy --all "oci-archive:$RUNNER_TEMP/demo.oci.tar" "docker://$IMAGE:$VERSION"
+          digest="$(skopeo inspect --raw "docker://$IMAGE:$VERSION" | sha256sum | cut -d' ' -f1)"
+          if [ "$LATEST" = true ]; then
+            skopeo copy --all "docker://$IMAGE@sha256:$digest" "docker://$IMAGE:latest"
+          fi
+          {
+            echo "Pushed \`$IMAGE:$VERSION\` = \`sha256:$digest\` ($(cat "$RUNNER_TEMP/platforms"))"
+            [ "$LATEST" = true ] && echo "and \`$IMAGE:latest\`"
+            echo
+            echo '```'
+            echo "docker run --rm -p 127.0.0.1:8080-8088:8080-8088 -p 127.0.0.1:50051:50051 $IMAGE:$VERSION"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -397,3 +397,19 @@ secrets; never dispatch one (a real version publishes for good).
 repository public, the release built here, Android and iOS too, the images
 published from here). Not run yet: it needs `IRETAIL_SOURCES_TOKEN` and the
 release key in the environment `release`.
+
+**Status** (2026-11-17, the demo image; README, "The demo"): `demo/` and
+**demo** (`.github/workflows/demo.yml`) build `ghcr.io/iretail-pro/software/demo`
+for a published release: the seven pilot stores of deploy's `demo/pilots`
+in one container, each its own node, database and port (8081 to 8087) with
+the back office and the register in the browser, the gateway with emulated
+devices on 50051, a start page on 8080. Verified here on Docker 29 with
+1.0.0, linux/amd64: `scripts/demo-context.sh` (the manifest checked with
+release-1, the node and console pulled by its digests), the image built,
+`scripts/demo-test.sh` (7 of 7 stores, each signing in with both tokens and
+listing its items), the back office and the register paired in Chromium
+and a cash sale made in the browser register, `DEMO_STORES` and a stop in
+1 s. Not run: the workflow on GitHub, the linux/arm64 node build and the
+arm64 image, Docker Desktop on macOS or Windows, the desktop register
+against the gateway in the container.
+

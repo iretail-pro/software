@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Demo devices</title>
+<style>
+  :root { --bg:#F8FAFC; --surface:#FFFFFF; --text:#0F172A; --text-2:#475569; --border:#E2E8F0;
+          --accent:#4F46E5; --accent-on:#FFFFFF; --paper:#FFFFFF; --code:#F1F5F9; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0B1120; --surface:#111827; --text:#F1F5F9; --text-2:#94A3B8; --border:#1F2937;
+            --accent:#818CF8; --accent-on:#0B1120; --paper:#F8FAFC; --code:#1F2937; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 Inter, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .wrap { max-width:1120px; margin:0 auto; padding:32px 16px 64px; }
+  h1 { font-size:28px; margin:0 0 4px; }
+  p.lead { color:var(--text-2); margin:0 0 24px; }
+  .grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,2fr); gap:16px; }
+  @media (max-width: 760px) { .grid { grid-template-columns:minmax(0,1fr); } }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:20px; margin-bottom:16px; }
+  h2 { font-size:19px; margin:0 0 12px; }
+  label { display:block; color:var(--text-2); font-size:14px; margin-bottom:4px; }
+  input { width:100%; min-height:44px; padding:8px 12px; border:1px solid var(--text-2); border-radius:10px; background:var(--surface); color:var(--text); font:inherit; }
+  button { min-height:44px; padding:8px 14px; margin-top:8px; border:0; border-radius:10px; background:var(--accent); color:var(--accent-on); font:inherit; font-weight:600; cursor:pointer; }
+  button:focus-visible, input:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .note { color:var(--text-2); font-size:14px; min-height:21px; margin:6px 0 0; }
+  .receipts { display:flex; flex-direction:column-reverse; gap:12px; }
+  pre { margin:0; background:var(--paper); color:#0F172A; border:1px solid var(--border); border-radius:8px; padding:12px; overflow:auto;
+        font:13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <h1>Demo devices</h1>
+  <p class="lead">The emulated devices the desktop register drives through the gateway (<code>localhost:50051</code>). <a href="/">Back to the stores</a></p>
+  <div class="grid">
+    <div>
+      <section class="card">
+        <h2>Scale</h2>
+        <label for="weight">Weight on the scale, lb</label>
+        <input id="weight" inputmode="decimal" value="1.250">
+        <button id="put">Put on the scale</button>
+        <p class="note" id="scale-note" role="status"></p>
+      </section>
+      <section class="card">
+        <h2>Scanner</h2>
+        <label for="code">Barcode</label>
+        <input id="code" inputmode="numeric" placeholder="A barcode from the catalog">
+        <button id="scan">Scan</button>
+        <p class="note" id="scan-note" role="status"></p>
+      </section>
+    </div>
+    <section class="card">
+      <h2>Receipt printer</h2>
+      <p class="note" id="printed" role="status">Nothing printed yet.</p>
+      <div class="receipts" id="receipts"></div>
+    </section>
+  </div>
+</main>
+<script>
+  const say = (id, text) => { document.getElementById(id).textContent = text; };
+  document.getElementById('put').onclick = async () => {
+    const lb = Number(document.getElementById('weight').value.replace(',', '.'));
+    if (!(lb >= 0)) { say('scale-note', 'Type a weight such as 1.250.'); return; }
+    const r = await fetch('/devices/scale', { method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ gross_milli: Math.round(lb * 1000), motion: false }) });
+    say('scale-note', r.ok ? `The scale reads ${lb.toFixed(3)} lb.` : 'The scale did not answer.');
+  };
+  document.getElementById('scan').onclick = async () => {
+    const data = document.getElementById('code').value.trim();
+    if (!data) { say('scan-note', 'Type a barcode first.'); return; }
+    const r = await fetch('/devices/scanner/scan', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ data }) });
+    const j = r.ok ? await r.json() : null;
+    say('scan-note', !j ? 'The scanner did not answer.' : j.delivered ? 'Scanned: the register has it.' : 'Scanned, but no register is listening to the scanner.');
+  };
+  let shown = -1;
+  async function poll() {
+    try {
+      const r = await fetch('/devices/printer/receipts');
+      const all = r.ok ? await r.json() : [];
+      if (all.length !== shown) {
+        shown = all.length;
+        const box = document.getElementById('receipts');
+        box.replaceChildren(...all.map((d) => { const p = document.createElement('pre'); p.textContent = d.text; return p; }));
+        say('printed', all.length ? `${all.length} printed, newest first.` : 'Nothing printed yet.');
+      }
+    } catch (_) { /* the container is stopping */ }
+    setTimeout(poll, 2000);
+  }
+  poll();
+</script>
+</body>
+</html>

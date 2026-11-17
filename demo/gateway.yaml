@@ -1,0 +1,28 @@
+# The demo's gateway (demo/run.py): every device is an emulator in the same
+# container. Plaintext with the demo's token on 50051, for the register on
+# this computer (README, "The demo").
+listen: 0.0.0.0:50051
+insecure_plaintext: true   # the demo only: published on this computer's loopback by `docker run -p 127.0.0.1:…`
+# The cloud printers below poll here (Star CloudPRNT, Epson Server Direct
+# Print); inside the container only.
+cloud_print_listen: 127.0.0.1:9444
+devices:
+  - {id: printer, kind: receipt_printer, driver: escpos, name: Receipt printer, address: "tcp://127.0.0.1:9100"}
+  - {id: labels, kind: label_printer, driver: zpl, name: Label printer, address: "tcp://127.0.0.1:9101"}
+  - {id: kitchen, kind: kitchen_printer, driver: escpos, name: Kitchen printer, address: "tcp://127.0.0.1:9102"}
+  - {id: scale, kind: scale, driver: mettler8217, name: Checkout scale, address: "tcp://127.0.0.1:9200", options: {unit: lb}}
+  - {id: scanner, kind: scanner, driver: serial_scanner, name: Scanner, address: "tcp://127.0.0.1:9400"}
+  - {id: card, kind: payment_terminal, driver: stripe_terminal, name: Card reader, options: {reader: tmr_emulator, base_url: "http://127.0.0.1:9500"}}
+  - {id: lane-terminal, kind: payment_terminal, driver: emulator_terminal, name: Card and EBT terminal, address: "http://127.0.0.1:9300"}
+  # The processors' terminals against their emulators; the credentials come
+  # from the gateway's environment (*_env), "emulator" in this stack.
+  - {id: adyen, kind: payment_terminal, driver: adyen_terminal, name: Adyen terminal,
+     options: {environment: test, poi_id: P400Plus-000000001, sale_id: register-1, api_key_env: ADYEN_API_KEY, base_url: "http://127.0.0.1:9501"}}
+  - {id: clover, kind: payment_terminal, driver: clover_rpd, name: Clover device,
+     options: {environment: sandbox, merchant_id: EMULATORMID, device_id: emulator-device, pos_id: register-1, access_token_env: CLOVER_ACCESS_TOKEN, base_url: "http://127.0.0.1:9502"}}
+  - {id: worldpay, kind: payment_terminal, driver: worldpay_tripos, name: Worldpay lane,
+     options: {environment: cert, lane_id: "1", application_id: "8888", acceptor_id: "1000000", account_id: "2000000", account_token_env: WORLDPAY_ACCOUNT_TOKEN, base_url: "http://127.0.0.1:9503"}}
+  - {id: fiserv, kind: payment_terminal, driver: fiserv_bolt, name: Fiserv terminal,
+     options: {environment: uat, merchant_id: "800000000000", hsn: EMU0000001, authorization_env: FISERV_BOLT_KEY, gateway_user: emulator, gateway_password_env: FISERV_GATEWAY_PASSWORD, bolt_url: "http://127.0.0.1:9504", gateway_url: "http://127.0.0.1:9504"}}
+  - {id: front, kind: receipt_printer, driver: star_cloudprnt, name: Star printer (CloudPRNT), options: {token_env: EMULATOR_PRINTER_TOKEN, poll_seconds: 2}}
+  - {id: bar, kind: kitchen_printer, driver: epson_sdp, name: Epson printer (Server Direct Print), options: {token_env: EMULATOR_PRINTER_TOKEN, poll_seconds: 2}}
