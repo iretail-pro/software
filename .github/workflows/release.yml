@@ -595,11 +595,13 @@ jobs:
   guides:
     # The PDF guides (docs/manuals): the figures are taken by the register's
     # and the back office's own screen tests at this release's commits, then
-    # Typst builds every guide in English and Russian. No secret but the
-    # sources token, which only checks the repositories out.
+    # Typst builds every guide in every language it is written in (English,
+    # Russian and the machine translations awaiting review, docs issue 0051).
+    # No secret but the sources token, which only checks the repositories out.
     needs: plan
     runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
-    timeout-minutes: 90
+    # Fourteen languages of figures from two apps' screen tests.
+    timeout-minutes: 300
     env:
       TYPST_VERSION: 0.15.1
       TYPST_SHA256: a6d077d0a95eed5a2eba715b2dae06be954f624ccbf85758a03f389ded33118c
@@ -640,10 +642,12 @@ jobs:
           echo "$RUNNER_TEMP/typst-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
       - name: The figures
         # The back office's table cards are rendered from its PDF with
-        # poppler's pdftoppm, which the hosted image does not carry.
+        # poppler's pdftoppm, which the hosted image does not carry. The Hindi
+        # and Chinese guides need Noto Sans Devanagari and Noto Sans CJK SC,
+        # which Typst finds among the system's fonts (docs/manuals/README.md).
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq poppler-utils
+          sudo apt-get install -y -qq poppler-utils fonts-noto-core fonts-noto-cjk
           img="$GITHUB_WORKSPACE/docs/docs/manuals/img"
           mkdir -p "$img"
           for app in cashier manager; do
