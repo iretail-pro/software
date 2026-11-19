@@ -55,6 +55,10 @@ tag already on that commit is left, a tag on another commit is never
 moved. For a release published before this step existed (1.0.0), or when
 the step failed, run **tag-sources** by hand with the version, and for a
 release without `sources.txt` the list as the input `sources`.
+The plan job checks the same rule before anything is built
+(`scripts/check-sources.sh`): a source `main` does not hold, such as a
+vendored core or design from a branch that never merged, stops the run
+there instead of failing the tag step after publishing.
 
 ## Secrets
 
