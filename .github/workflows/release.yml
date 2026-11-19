@@ -257,6 +257,21 @@ jobs:
           grep -Evq '^[a-z0-9-]+ [0-9a-f]{40}$' <<<"$list" && { echo "::error::a source has no commit:"; echo "$list"; exit 1; }
           { echo 'list<<EOF'; echo "$list"; echo EOF; } >> "$GITHUB_OUTPUT"
           { echo '### Tagged once published'; echo; echo '```'; echo "$list"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          path: self
+          persist-credentials: false
+          sparse-checkout: scripts
+      - name: Every source is on its main
+        # tag-sources.sh refuses to tag a commit its main does not hold; the
+        # same check here stops the run before anything is built (1.1.0's
+        # design was vendored from a branch that never merged).
+        env:
+          GH_TOKEN: ${{ secrets.IRETAIL_SOURCES_TOKEN }}
+          LIST: ${{ steps.sources.outputs.list }}
+        run: |
+          printf '%s\n' "$LIST" > "$RUNNER_TEMP/sources.txt"
+          self/scripts/check-sources.sh "$RUNNER_TEMP/sources.txt"
 
   node-image:
     needs: plan
@@ -600,7 +615,7 @@ jobs:
     # No secret but the sources token, which only checks the repositories out.
     needs: plan
     runs-on: ${{ fromJSON(vars.RUNNER || '"ubuntu-latest"') }}
-    # Fourteen languages of figures from two apps' screen tests.
+    # Fifteen languages of figures from two apps' screen tests.
     timeout-minutes: 300
     env:
       TYPST_VERSION: 0.15.1
