@@ -835,6 +835,33 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: false
+      # App Store Connect takes only builds made with Apple's current SDK
+      # (ITMS-90725: from April 2027, the iOS 27 SDK of Xcode 27 or later).
+      # The runner image's default Xcode lags behind the newest it carries,
+      # so the newest installed Xcode is selected and its major checked.
+      - name: Select the newest Xcode
+        if: steps.secrets.outputs.build == 'true'
+        env:
+          MIN_XCODE_MAJOR: ${{ vars.MIN_XCODE_MAJOR || '27' }}
+        run: |
+          newest=""
+          best=0
+          for app in /Applications/Xcode*.app; do
+            [ -d "$app" ] || continue
+            v=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist" 2>/dev/null) || continue
+            major=${v%%.*}; rest=${v#*.}; minor=${rest%%.*}
+            [ "$rest" = "$v" ] && minor=0
+            key=$((major * 1000 + minor))
+            if [ "$key" -gt "$best" ]; then best=$key; newest=$app; fi
+          done
+          [ -n "$newest" ] || { echo "::error::no Xcode on this runner"; exit 1; }
+          sudo xcode-select -s "$newest/Contents/Developer"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          major=$((best / 1000))
+          if [ "$major" -lt "$MIN_XCODE_MAJOR" ]; then
+            echo "::warning::Xcode $major is the newest here; App Store Connect wants Xcode $MIN_XCODE_MAJOR or later from April 2027 (ITMS-90725)"
+          fi
       - name: Build, sign for App Store Connect, export
         if: steps.secrets.outputs.build == 'true'
         env:
